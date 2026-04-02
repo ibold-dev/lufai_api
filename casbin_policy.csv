@@ -1,0 +1,14 @@
+p, role:admin, /products/*, read, any
+p, role:admin, /products/*, approve, any
+p, role:admin, /products/*, reject, any
+p, role:admin, /orders/*, read, any
+
+p, role:seller, /products/*, read, self
+p, role:seller, /products/*, create, self
+p, role:seller, /products/*, update, self
+p, role:seller, /products/*, delete, self
+
+p, role:customer, /orders/*, read, self
+p, role:customer, /orders/*, create, self
+p, role:customer, /orders/*, pay, self
+

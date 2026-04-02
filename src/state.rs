@@ -1,0 +1,32 @@
+use crate::http::error::ApiError;
+use sqlx::PgPool;
+
+#[derive(Clone)]
+pub struct AppState {
+    pub pool: PgPool,
+    pub jwt_secret: String,
+    pub jwt_issuer: String,
+    pub access_token_ttl_secs: i64,
+}
+
+impl AppState {
+    pub fn from_pool(pool: PgPool) -> Result<Self, ApiError> {
+        let jwt_secret = std::env::var("JWT_SECRET")
+            .map_err(|_| ApiError::internal("JWT_SECRET is not set".to_string()))?;
+
+        let jwt_issuer = std::env::var("JWT_ISSUER").unwrap_or_else(|_| "lufai_api".to_string());
+
+        let access_token_ttl_secs = std::env::var("JWT_ACCESS_TOKEN_TTL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(86_400);
+
+        Ok(Self {
+            pool,
+            jwt_secret,
+            jwt_issuer,
+            access_token_ttl_secs,
+        })
+    }
+}
+
