@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::{auth::jwt, authz::casbin as casbin_authz, http::error::ApiError, state::AppState};
 
+use paystack::{Currency, PaystackClient, ReqwestClient, TransactionRequestBuilder};
 use sha2::{Digest, Sha256};
 
 pub fn routes() -> Router {
@@ -358,6 +359,20 @@ pub(crate) async fn get_order(
     Ok(Json(order))
 }
 
+fn paystack_currency_code(code: &str) -> Result<Currency, ApiError> {
+    match code {
+        "NGN" => Ok(Currency::NGN),
+        "GHS" => Ok(Currency::GHS),
+        "USD" => Ok(Currency::USD),
+        "ZAR" => Ok(Currency::ZAR),
+        "KES" => Ok(Currency::KES),
+        "XOF" => Ok(Currency::XOF),
+        _ => Err(ApiError::bad_request(
+            "unsupported currency for Paystack integration",
+        )),
+    }
+}
+
 fn deterministic_paystack_reference(order_id: Uuid, idempotency_key: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(order_id.to_string());
@@ -556,41 +571,35 @@ pub(crate) async fn initialize_paystack(
     let callback_url = std::env::var("PAYSTACK_CALLBACK_URL")
         .unwrap_or_else(|_| "https://example.com/paystack/callback".to_string());
 
-    let client = reqwest::Client::new();
+    let pay_currency = paystack_currency_code(&currency)?;
+
     let metadata = serde_json::json!({
         "order_id": order_id.to_string(),
         "customer_id": customer_id.to_string(),
         "idempotency_key": idemp_key,
     });
+    let metadata_str = serde_json::to_string(&metadata)
+        .map_err(|e| ApiError::internal(format!("paystack metadata: {e}")))?;
 
-    let payload = serde_json::json!({
-        "email": customer_email,
-        "amount": order_total_cents,
-        "currency": "NGN",
-        "reference": reference,
-        "callback_url": callback_url,
-        "metadata": metadata,
-    });
+    let body = TransactionRequestBuilder::default()
+        .amount(order_total_cents.to_string())
+        .email(customer_email)
+        .currency(pay_currency)
+        .reference(reference.clone())
+        .callback_url(callback_url)
+        .metadata(metadata_str)
+        .build()
+        .map_err(|e| ApiError::internal(format!("paystack request build: {e}")))?;
 
+    let client = PaystackClient::<ReqwestClient>::new(paystack_secret);
     let res = client
-        .post("https://api.paystack.co/transaction/initialize")
-        .bearer_auth(paystack_secret)
-        .json(&payload)
-        .send()
+        .transactions
+        .initialize_transaction(body)
         .await
         .map_err(|e| ApiError::internal(format!("paystack request failed: {e}")))?;
 
-    let body: serde_json::Value = res
-        .json()
-        .await
-        .map_err(|e| ApiError::internal(format!("invalid paystack response: {e}")))?;
-
-    if body.get("status").and_then(|v| v.as_bool()) != Some(true) {
-        let message = body
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or("paystack initialization failed");
-
+    if !res.status {
+        let message = res.message.clone();
         sqlx::query(
             "UPDATE payment_attempts
              SET status = 'failed', updated_at = now(), raw_payload = $1
@@ -604,21 +613,13 @@ pub(crate) async fn initialize_paystack(
         return Err(ApiError::bad_request(message));
     }
 
-    let data = body
-        .get("data")
+    let data = res
+        .data
         .ok_or_else(|| ApiError::internal("paystack missing data".to_string()))?;
-    let authorization_url = data
-        .get("authorization_url")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| ApiError::internal("paystack missing authorization_url".to_string()))?;
-    let access_code = data
-        .get("access_code")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| ApiError::internal("paystack missing access_code".to_string()))?;
 
     let raw_payload = serde_json::json!({
-        "authorization_url": authorization_url,
-        "access_code": access_code,
+        "authorization_url": data.authorization_url,
+        "access_code": data.access_code,
         "reference": reference,
     });
 
@@ -646,8 +647,8 @@ pub(crate) async fn initialize_paystack(
     Ok(Json(PaystackInitializeResponse {
         order_id,
         paystack_reference: reference,
-        authorization_url: authorization_url.to_string(),
-        access_code: access_code.to_string(),
+        authorization_url: data.authorization_url,
+        access_code: data.access_code,
     }))
 }
 

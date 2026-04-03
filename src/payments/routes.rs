@@ -4,6 +4,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
+use paystack::{PaystackClient, ReqwestClient};
 use serde_json::Value;
 use sha2::Sha512;
 use std::net::SocketAddr;
@@ -36,6 +37,28 @@ fn header_signature(headers: &HeaderMap) -> std::result::Result<String, ApiError
         .ok_or_else(ApiError::unauthorized)?;
     let sig = sig.to_str().map_err(|_| ApiError::unauthorized())?;
     Ok(sig.to_string())
+}
+
+/// When set to `1` or `true`, the webhook uses signed payload amounts only (for local tests).
+/// **Do not set in production** — production should confirm `charge.success` via the SDK.
+fn paystack_webhook_sdk_verify_disabled() -> bool {
+    std::env::var("PAYSTACK_WEBHOOK_DISABLE_SDK_VERIFY")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Confirms the charge with Paystack using [`TransactionEndpoints::verify_transaction`].
+async fn paystack_verified_amount_cents(reference: &str, secret: &str) -> Option<i64> {
+    let client = PaystackClient::<ReqwestClient>::new(secret.to_string());
+    let res = client.transactions.verify_transaction(reference).await.ok()?;
+    if !res.status {
+        return None;
+    }
+    let data = res.data?;
+    if data.status != "success" {
+        return None;
+    }
+    Some(i64::from(data.amount))
 }
 
 fn verify_paystack_signature(
@@ -118,6 +141,18 @@ pub(crate) async fn paystack_webhook(
         return StatusCode::BAD_REQUEST;
     };
 
+    let amount_cents = if paystack_webhook_sdk_verify_disabled() {
+        payload
+            .pointer("/data/amount")
+            .and_then(|v| v.as_i64())
+            .unwrap_or_default()
+    } else {
+        match paystack_verified_amount_cents(&reference, &paystack_secret).await {
+            Some(a) => a,
+            None => return StatusCode::OK,
+        }
+    };
+
     // Process-once + atomic state updates.
     // Intentionally always return 200 on processing errors to avoid retries
     // causing partial side-effects.
@@ -178,13 +213,7 @@ pub(crate) async fn paystack_webhook(
     let expected_amount: i64 = payment_row.try_get("amount_cents").unwrap_or_default();
     let current_status: String = payment_row.try_get("status").unwrap_or_default();
 
-    // Paystack event amount is in subunits.
-    let event_amount: i64 = payload
-        .pointer("/data/amount")
-        .and_then(|v| v.as_i64())
-        .unwrap_or_default();
-
-    if event_amount != expected_amount {
+    if amount_cents != expected_amount {
         let _ = sqlx::query(
             "UPDATE payment_attempts
              SET status = 'failed', updated_at = now(), raw_payload = $1
@@ -193,7 +222,7 @@ pub(crate) async fn paystack_webhook(
         .bind(serde_json::json!({
             "error": "amount mismatch",
             "expected_amount": expected_amount,
-            "event_amount": event_amount,
+            "verified_amount": amount_cents,
             "reference": reference,
         }))
         .bind(payment_attempt_id)
@@ -275,7 +304,10 @@ mod tests {
         };
 
         let paystack_secret = "test_paystack_secret";
-        unsafe { std::env::set_var("PAYSTACK_SECRET_KEY", paystack_secret) };
+        unsafe {
+            std::env::set_var("PAYSTACK_SECRET_KEY", paystack_secret);
+            std::env::set_var("PAYSTACK_WEBHOOK_DISABLE_SDK_VERIFY", "1");
+        }
 
         let pool = PgPoolOptions::new()
             .max_connections(5)
