@@ -31,6 +31,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
       PAYSTACK_SECRET_KEY: ${PAYSTACK_SECRET_KEY:-}
       PAYSTACK_CALLBACK_URL: ${PAYSTACK_CALLBACK_URL:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
     ports:
       - "3000:3000"
     depends_on:

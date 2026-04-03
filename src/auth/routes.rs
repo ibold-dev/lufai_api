@@ -4,12 +4,12 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set};
 use uuid::Uuid;
 use validator::Validate;
 
 use crate::{
-    auth::{jwt, password},
+    auth::{google, jwt, password},
     db::db_err_is_unique_violation,
     entity::{admin, customer, seller},
     http::error::ApiError,
@@ -20,6 +20,7 @@ pub fn routes() -> Router {
     Router::new()
         .route("/customers/auth/register", post(customer_register))
         .route("/customers/auth/login", post(customer_login))
+        .route("/customers/auth/google", post(customer_google_sign_in))
         .route("/sellers/auth/login", post(seller_login))
         .route("/admins/auth/login", post(admin_login))
 }
@@ -38,6 +39,30 @@ pub struct AuthResponse {
     pub token_type: &'static str,
     pub expires_in: i64,
     pub subject: String,
+}
+
+/// Google Sign-In ID token (from GIS / OAuth). Accepts JSON field `id_token` or `credential` (One Tap).
+#[derive(Debug, Deserialize, Validate, utoipa::ToSchema)]
+pub struct GoogleSignInRequest {
+    #[validate(length(min = 10, max = 12000))]
+    #[serde(alias = "credential")]
+    pub id_token: String,
+}
+
+fn issue_customer_token(state: &AppState, customer_id: Uuid) -> Result<Json<AuthResponse>, ApiError> {
+    let subject = format!("customer:{customer_id}");
+    let access_token = jwt::create_access_token(
+        &subject,
+        &state.jwt_secret,
+        &state.jwt_issuer,
+        state.access_token_ttl_secs,
+    )?;
+    Ok(Json(AuthResponse {
+        access_token,
+        token_type: "bearer",
+        expires_in: state.access_token_ttl_secs,
+        subject,
+    }))
 }
 
 fn validate_credentials(req: &EmailPasswordRequest) -> Result<(), ApiError> {
@@ -62,14 +87,15 @@ pub(crate) async fn customer_register(
     validate_credentials(&req)?;
 
     let password_hash = password::hash_password(&req.password)?;
-    let email = req.email.trim();
+    let email = req.email.trim().to_lowercase();
 
     let customer_id = Uuid::new_v4();
     let now = chrono::Utc::now();
     let active = customer::ActiveModel {
         id: Set(customer_id),
-        email: Set(email.to_string()),
-        password_hash: Set(password_hash),
+        email: Set(email),
+        password_hash: Set(Some(password_hash)),
+        google_sub: Set(None),
         phone: Set(None),
         address: Set(None),
         created_at: Set(now),
@@ -86,20 +112,91 @@ pub(crate) async fn customer_register(
         }
     }
 
-    let subject = format!("customer:{customer_id}");
-    let access_token = jwt::create_access_token(
-        &subject,
-        &state.jwt_secret,
-        &state.jwt_issuer,
-        state.access_token_ttl_secs,
-    )?;
+    issue_customer_token(&state, customer_id)
+}
 
-    Ok(Json(AuthResponse {
-        access_token,
-        token_type: "bearer",
-        expires_in: state.access_token_ttl_secs,
-        subject,
-    }))
+#[utoipa::path(
+    post,
+    path = "/v1/customers/auth/google",
+    request_body = GoogleSignInRequest,
+    responses(
+        (status = 200, body = AuthResponse),
+        (status = 400, body = crate::http::error::ProblemDetails),
+        (status = 409, body = crate::http::error::ProblemDetails),
+        (status = 500, body = crate::http::error::ProblemDetails),
+    )
+)]
+pub(crate) async fn customer_google_sign_in(
+    Extension(state): Extension<AppState>,
+    Json(req): Json<GoogleSignInRequest>,
+) -> Result<Json<AuthResponse>, ApiError> {
+    req.validate()
+        .map_err(|_| ApiError::bad_request("invalid request"))?;
+    let google_client_id = state.google_client_id.as_ref().ok_or_else(|| {
+        ApiError::internal("Google sign-in is not configured (set GOOGLE_CLIENT_ID)".to_string())
+    })?;
+
+    let claims = google::verify_google_id_token(
+        &state.http_client,
+        google_client_id,
+        &req.id_token,
+    )
+    .await?;
+
+    let email = claims.email.trim().to_lowercase();
+
+    if let Some(row) = customer::Entity::find()
+        .filter(customer::Column::GoogleSub.eq(claims.sub.as_str()))
+        .one(&state.db)
+        .await?
+    {
+        return issue_customer_token(&state, row.id);
+    }
+
+    if let Some(row) = customer::Entity::find()
+        .filter(customer::Column::Email.eq(&email))
+        .one(&state.db)
+        .await?
+    {
+        if let Some(ref gs) = row.google_sub {
+            if gs != &claims.sub {
+                return Err(ApiError::conflict(
+                    "email is already linked to a different Google account",
+                ));
+            }
+            return issue_customer_token(&state, row.id);
+        }
+        let cid = row.id;
+        let mut active = row.into_active_model();
+        active.google_sub = Set(Some(claims.sub));
+        active.updated_at = Set(chrono::Utc::now());
+        active.update(&state.db).await?;
+        return issue_customer_token(&state, cid);
+    }
+
+    let customer_id = Uuid::new_v4();
+    let now = chrono::Utc::now();
+    customer::Entity::insert(customer::ActiveModel {
+        id: Set(customer_id),
+        email: Set(email),
+        password_hash: Set(None),
+        google_sub: Set(Some(claims.sub)),
+        phone: Set(None),
+        address: Set(None),
+        created_at: Set(now),
+        updated_at: Set(now),
+    })
+    .exec(&state.db)
+    .await
+    .map_err(|e| {
+        if db_err_is_unique_violation(&e) {
+            ApiError::conflict("could not create account")
+        } else {
+            ApiError::from(e)
+        }
+    })?;
+
+    issue_customer_token(&state, customer_id)
 }
 
 #[utoipa::path(
@@ -117,10 +214,10 @@ pub(crate) async fn customer_login(
     Json(req): Json<EmailPasswordRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
     validate_credentials(&req)?;
-    let email = req.email.trim();
+    let email = req.email.trim().to_lowercase();
 
     let row = customer::Entity::find()
-        .filter(customer::Column::Email.eq(email))
+        .filter(customer::Column::Email.eq(&email))
         .one(&state.db)
         .await?;
 
@@ -129,27 +226,16 @@ pub(crate) async fn customer_login(
     };
 
     let customer_id = row.id;
-    let password_hash = row.password_hash;
+    let password_hash = row
+        .password_hash
+        .ok_or_else(ApiError::unauthorized)?;
 
     let ok = password::verify_password(&password_hash, &req.password)?;
     if !ok {
         return Err(ApiError::unauthorized());
     }
 
-    let subject = format!("customer:{customer_id}");
-    let access_token = jwt::create_access_token(
-        &subject,
-        &state.jwt_secret,
-        &state.jwt_issuer,
-        state.access_token_ttl_secs,
-    )?;
-
-    Ok(Json(AuthResponse {
-        access_token,
-        token_type: "bearer",
-        expires_in: state.access_token_ttl_secs,
-        subject,
-    }))
+    issue_customer_token(&state, customer_id)
 }
 
 #[utoipa::path(

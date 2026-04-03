@@ -40,6 +40,7 @@ impl Modify for SecurityAddon {
         crate::http::handlers::v1_root,
         crate::auth::routes::customer_register,
         crate::auth::routes::customer_login,
+        crate::auth::routes::customer_google_sign_in,
         crate::auth::routes::seller_login,
         crate::auth::routes::admin_login,
         crate::products::routes::create_product,

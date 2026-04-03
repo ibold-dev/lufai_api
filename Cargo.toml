@@ -36,3 +36,5 @@ sea-orm-migration = { version = "1.1.20", features = ["sqlx-postgres", "runtime-
 validator = { version = "0.20.0", features = ["derive"] }
 tower_governor = "0.8.0"
 governor = "0.10.4"
+rsa = { version = "0.9.10", features = ["pem"] }
+base64 = { version = "0.22.1", features = ["alloc"] }

@@ -9,7 +9,11 @@ pub struct Model {
     pub id: Uuid,
     #[sea_orm(unique)]
     pub email: String,
-    pub password_hash: String,
+    /// Set when the account uses email/password. `None` for Google-only sign-in.
+    pub password_hash: Option<String>,
+    /// Google `sub` claim; unique per Google account when present.
+    #[sea_orm(unique)]
+    pub google_sub: Option<String>,
     pub phone: Option<String>,
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub address: Option<Json>,

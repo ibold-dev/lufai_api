@@ -285,11 +285,11 @@ pub(crate) async fn paystack_webhook(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::migration::Migrator;
     use axum::body::Body;
     use axum::http::header::HeaderValue;
     use axum::response::IntoResponse;
     use chrono::{DateTime, Utc};
-    use crate::migration::Migrator;
     use sea_orm::{Set, SqlxPostgresConnector};
     use sea_orm_migration::MigratorTrait;
     use sqlx::postgres::PgPoolOptions;
@@ -335,7 +335,8 @@ mod tests {
         crate::entity::customer::Entity::insert(crate::entity::customer::ActiveModel {
             id: Set(customer_id),
             email: Set(customer_email),
-            password_hash: Set("dummy_hash".into()),
+            password_hash: Set(Some("dummy_hash".into())),
+            google_sub: Set(None),
             phone: Set(None),
             address: Set(None),
             created_at: Set(now),
@@ -374,12 +375,10 @@ mod tests {
             amount_cents: Set(amount_cents),
             currency: Set("NGN".into()),
             status: Set("initialized".into()),
-            raw_payload: Set(Some(
-                serde_json::json!({
-                    "authorization_url": "https://example.com/auth",
-                    "access_code": "ACME"
-                }),
-            )),
+            raw_payload: Set(Some(serde_json::json!({
+                "authorization_url": "https://example.com/auth",
+                "access_code": "ACME"
+            }))),
             paid_at: Set(None),
             created_at: Set(now),
             updated_at: Set(now),
@@ -393,6 +392,8 @@ mod tests {
             jwt_secret: "test".to_string(),
             jwt_issuer: "test".to_string(),
             access_token_ttl_secs: 3600,
+            http_client: reqwest::Client::new(),
+            google_client_id: None,
         };
 
         let payload = serde_json::json!({

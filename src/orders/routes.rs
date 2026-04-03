@@ -712,7 +712,8 @@ mod tests {
         customer::Entity::insert(customer::ActiveModel {
             id: Set(customer_id),
             email: Set(format!("customer+{}@example.com", Uuid::new_v4())),
-            password_hash: Set("dummy_hash".into()),
+            password_hash: Set(Some("dummy_hash".into())),
+            google_sub: Set(None),
             phone: Set(None),
             address: Set(None),
             created_at: Set(now),
@@ -727,6 +728,8 @@ mod tests {
             jwt_secret: jwt_secret.to_string(),
             jwt_issuer: jwt_issuer.to_string(),
             access_token_ttl_secs: 3600,
+            http_client: reqwest::Client::new(),
+            google_client_id: None,
         };
 
         let subject = format!("customer:{customer_id}");
@@ -835,7 +838,8 @@ mod tests {
         customer::Entity::insert(customer::ActiveModel {
             id: Set(customer_id),
             email: Set(format!("customer+{}@example.com", Uuid::new_v4())),
-            password_hash: Set("dummy_hash".into()),
+            password_hash: Set(Some("dummy_hash".into())),
+            google_sub: Set(None),
             phone: Set(None),
             address: Set(None),
             created_at: Set(now),
@@ -868,6 +872,8 @@ mod tests {
             jwt_secret: jwt_secret.to_string(),
             jwt_issuer: jwt_issuer.to_string(),
             access_token_ttl_secs: 3600,
+            http_client: reqwest::Client::new(),
+            google_client_id: None,
         };
 
         let subject = format!("customer:{customer_id}");

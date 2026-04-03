@@ -1679,6 +1679,7 @@ version = "0.1.0"
 dependencies = [
  "argon2",
  "axum",
+ "base64",
  "casbin",
  "chrono",
  "governor",
@@ -1688,6 +1689,7 @@ dependencies = [
  "paystack-rs",
  "rand_core 0.6.4",
  "reqwest",
+ "rsa",
  "sea-orm",
  "sea-orm-migration",
  "serde",
