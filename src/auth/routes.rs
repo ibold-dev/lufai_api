@@ -33,6 +33,16 @@ pub struct EmailPasswordRequest {
     pub password: String,
 }
 
+#[derive(Debug, Deserialize, Validate, utoipa::ToSchema)]
+pub struct CustomerRegisterRequest {
+    #[validate(email, length(max = 254))]
+    pub email: String,
+    #[validate(length(min = 8, max = 256))]
+    pub password: String,
+    #[validate(length(min = 1, max = 200))]
+    pub full_name: String,
+}
+
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct AuthResponse {
     pub access_token: String,
@@ -70,10 +80,15 @@ fn validate_credentials(req: &EmailPasswordRequest) -> Result<(), ApiError> {
         .map_err(|_| ApiError::bad_request("invalid email or password"))
 }
 
+fn validate_customer_register(req: &CustomerRegisterRequest) -> Result<(), ApiError> {
+    req.validate()
+        .map_err(|_| ApiError::bad_request("invalid registration data"))
+}
+
 #[utoipa::path(
     post,
     path = "/v1/customers/auth/register",
-    request_body = EmailPasswordRequest,
+    request_body = CustomerRegisterRequest,
     responses(
         (status = 200, body = AuthResponse),
         (status = 400, body = crate::http::error::ProblemDetails),
@@ -82,12 +97,13 @@ fn validate_credentials(req: &EmailPasswordRequest) -> Result<(), ApiError> {
 )]
 pub(crate) async fn customer_register(
     Extension(state): Extension<AppState>,
-    Json(req): Json<EmailPasswordRequest>,
+    Json(req): Json<CustomerRegisterRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
-    validate_credentials(&req)?;
+    validate_customer_register(&req)?;
 
     let password_hash = password::hash_password(&req.password)?;
     let email = req.email.trim().to_lowercase();
+    let full_name = req.full_name.trim().to_string();
 
     let customer_id = Uuid::new_v4();
     let now = chrono::Utc::now();
@@ -96,6 +112,7 @@ pub(crate) async fn customer_register(
         email: Set(email),
         password_hash: Set(Some(password_hash)),
         google_sub: Set(None),
+        full_name: Set(full_name),
         phone: Set(None),
         address: Set(None),
         created_at: Set(now),
@@ -143,6 +160,7 @@ pub(crate) async fn customer_google_sign_in(
     )
     .await?;
 
+    let google_full_name = google::google_display_name(&claims);
     let email = claims.email.trim().to_lowercase();
 
     if let Some(row) = customer::Entity::find()
@@ -167,8 +185,13 @@ pub(crate) async fn customer_google_sign_in(
             return issue_customer_token(&state, row.id);
         }
         let cid = row.id;
+        let fill_name = row.full_name.trim().is_empty() && !google_full_name.is_empty();
+        let sub = claims.sub;
         let mut active = row.into_active_model();
-        active.google_sub = Set(Some(claims.sub));
+        active.google_sub = Set(Some(sub));
+        if fill_name {
+            active.full_name = Set(google_full_name);
+        }
         active.updated_at = Set(chrono::Utc::now());
         active.update(&state.db).await?;
         return issue_customer_token(&state, cid);
@@ -181,6 +204,7 @@ pub(crate) async fn customer_google_sign_in(
         email: Set(email),
         password_hash: Set(None),
         google_sub: Set(Some(claims.sub)),
+        full_name: Set(google_full_name),
         phone: Set(None),
         address: Set(None),
         created_at: Set(now),

@@ -685,6 +685,7 @@ mod tests {
         seller::Entity::insert(seller::ActiveModel {
             id: Set(seller_id),
             email: Set(format!("seller+{}@example.com", Uuid::new_v4())),
+            full_name: Set("Test Seller".into()),
             password_hash: Set("dummy_hash".into()),
             created_at: Set(now),
             updated_at: Set(now),
@@ -714,6 +715,7 @@ mod tests {
             email: Set(format!("customer+{}@example.com", Uuid::new_v4())),
             password_hash: Set(Some("dummy_hash".into())),
             google_sub: Set(None),
+            full_name: Set("Test Customer".into()),
             phone: Set(None),
             address: Set(None),
             created_at: Set(now),
@@ -811,6 +813,7 @@ mod tests {
         seller::Entity::insert(seller::ActiveModel {
             id: Set(seller_id),
             email: Set(format!("seller+{}@example.com", Uuid::new_v4())),
+            full_name: Set("Test Seller".into()),
             password_hash: Set("dummy_hash".into()),
             created_at: Set(now),
             updated_at: Set(now),
@@ -840,6 +843,7 @@ mod tests {
             email: Set(format!("customer+{}@example.com", Uuid::new_v4())),
             password_hash: Set(Some("dummy_hash".into())),
             google_sub: Set(None),
+            full_name: Set("Test Customer".into()),
             phone: Set(None),
             address: Set(None),
             created_at: Set(now),

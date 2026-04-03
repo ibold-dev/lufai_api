@@ -14,6 +14,7 @@ pub struct Model {
     /// Google `sub` claim; unique per Google account when present.
     #[sea_orm(unique)]
     pub google_sub: Option<String>,
+    pub full_name: String,
     pub phone: Option<String>,
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub address: Option<Json>,

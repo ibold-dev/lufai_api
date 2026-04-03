@@ -36,6 +36,20 @@ pub struct GoogleIdTokenClaims {
     pub sub: String,
     pub email: String,
     pub email_verified: bool,
+    /// Display name from Google profile (optional in token).
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// Best-effort display name from Google `name` claim for `full_name`.
+pub fn google_display_name(claims: &GoogleIdTokenClaims) -> String {
+    claims
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("")
+        .to_string()
 }
 
 struct JwksCache {

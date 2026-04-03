@@ -337,6 +337,7 @@ mod tests {
             email: Set(customer_email),
             password_hash: Set(Some("dummy_hash".into())),
             google_sub: Set(None),
+            full_name: Set("Test Customer".into()),
             phone: Set(None),
             address: Set(None),
             created_at: Set(now),
