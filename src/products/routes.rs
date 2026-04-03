@@ -313,7 +313,7 @@ async fn load_images_for_product(
     Ok(rows.into_iter().map(image_row_to_response).collect())
 }
 
-async fn load_images_by_product_ids(
+pub(crate) async fn load_images_by_product_ids(
     db: &sea_orm::DatabaseConnection,
     ids: &[Uuid],
 ) -> Result<HashMap<Uuid, Vec<ProductImageResponse>>, ApiError> {
@@ -336,7 +336,7 @@ async fn load_images_by_product_ids(
     Ok(map)
 }
 
-fn model_to_response(m: product::Model, images: Vec<ProductImageResponse>) -> ProductResponse {
+pub(crate) fn model_to_response(m: product::Model, images: Vec<ProductImageResponse>) -> ProductResponse {
     ProductResponse {
         id: m.id,
         seller_id: m.seller_id,

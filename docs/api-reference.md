@@ -31,6 +31,19 @@ Auth routes use **stricter rate limiting** than the rest of the API (see `main.r
 
 ---
 
+## Catalog (public)
+
+Approved listings only (`status = approved`). No authentication.
+
+| Method | Path | Query / notes |
+|--------|------|----------------|
+| `GET` | `/v1/products` | `limit` (default 20, max 50), `offset`, optional `q` (title substring, case-insensitive) |
+| `GET` | `/v1/products/{product_id}` | |
+
+List responses include pagination: `items`, `total`, `limit`, `offset`.
+
+---
+
 ## Products (seller)
 
 | Method | Path | Principal |
@@ -87,10 +100,22 @@ Auth routes use **stricter rate limiting** than the rest of the API (see `main.r
 
 ---
 
+## Customer profile
+
+| Method | Path | Principal |
+|--------|------|-------------|
+| `GET` | `/v1/customers/me` | Customer JWT |
+| `PATCH` | `/v1/customers/me` | Customer JWT |
+
+`PATCH` accepts any of `full_name`, `phone`, `address` (send JSON `null` for `address` to clear). At least one field is required per request.
+
+---
+
 ## Orders (customer)
 
 | Method | Path | Principal | Headers |
 |--------|------|-----------|---------|
+| `GET` | `/v1/orders` | Customer JWT | `limit` (default 20, max 100), `offset` — paginated summaries: `items`, `total`, `limit`, `offset` |
 | `POST` | `/v1/orders` | Customer JWT | **`Idempotency-Key`** (required) |
 | `GET` | `/v1/orders/{order_id}` | Customer JWT | |
 | `POST` | `/v1/orders/{order_id}/paystack/initialize` | Customer JWT | **`Idempotency-Key`** (required) |
@@ -132,5 +157,8 @@ Error body shape: **`ProblemDetails`** — see [frontend-integration.md](fronten
 | Order line items | 100 max |
 | Quantity per line | 10,000 max |
 | JSON blobs (e.g. delivery address) | 16 KiB serialized max |
+| Catalog page size | default 20, max 50 |
+| Order list page size | default 20, max 100 |
+| Catalog search `q` | 200 chars max (wildcards stripped) |
 
 Exact constants: `src/http/limits.rs`.

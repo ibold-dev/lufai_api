@@ -47,3 +47,24 @@ pub const MAX_PROMOTION_NAME_LEN: usize = 200;
 
 /// Max products linked to a single promotion (abuse mitigation).
 pub const MAX_PROMOTION_PRODUCT_IDS: usize = 500;
+
+/// Public catalog: default page size (`GET /v1/products`).
+pub const DEFAULT_CATALOG_PAGE_SIZE: u32 = 20;
+
+/// Public catalog: max page size.
+pub const MAX_CATALOG_PAGE_SIZE: u32 = 50;
+
+/// Public catalog: optional search string (`q`) max chars.
+pub const MAX_CATALOG_SEARCH_LEN: usize = 200;
+
+/// Customer profile: display name.
+pub const MAX_CUSTOMER_FULL_NAME_LEN: usize = 200;
+
+/// Customer profile: phone (E.164-ish; keep bounded).
+pub const MAX_CUSTOMER_PHONE_LEN: usize = 32;
+
+/// Paged list: default page size (orders, etc.).
+pub const DEFAULT_PAGE_SIZE: u32 = 20;
+
+/// Paged list: max page size.
+pub const MAX_PAGE_SIZE: u32 = 100;

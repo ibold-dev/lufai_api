@@ -10,6 +10,8 @@ mod payments;
 mod state;
 mod openapi;
 mod cart;
+mod catalog;
+mod customers;
 mod promotions;
 
 use axum::extract::DefaultBodyLimit;
@@ -69,10 +71,12 @@ async fn main() -> Result<(), ApiError> {
     let state = AppState::from_db(db)?;
 
     let v1_business = axum::Router::new()
+        .merge(catalog::routes::routes())
         .merge(products::routes::routes())
         .merge(promotions::routes::routes())
         .merge(orders::routes::routes())
         .merge(cart::routes::routes())
+        .merge(customers::routes::routes())
         .merge(payments::routes::routes())
         .layer(governor_default_api());
 

@@ -1,7 +1,12 @@
-use axum::{Json, Router, extract::Extension, http::HeaderMap, routing::post};
+use axum::{
+    extract::{Extension, Query},
+    http::HeaderMap,
+    routing::{get, post},
+    Json, Router,
+};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
-    Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -12,7 +17,7 @@ use crate::{
     db::db_err_is_unique_violation,
     entity::{customer, order_payment_idempotency, orders as order_tbl, payment_attempt},
     http::error::ApiError,
-    http::limits::MAX_IDEMPOTENCY_KEY_LEN,
+    http::limits::{MAX_IDEMPOTENCY_KEY_LEN, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE},
     payments::methods as payment_methods,
     state::AppState,
 };
@@ -22,6 +27,7 @@ use sha2::{Digest, Sha256};
 
 pub fn routes() -> Router {
     Router::new()
+        .route("/orders", get(list_orders))
         .route("/orders", post(create_order))
         .route("/orders/{order_id}", axum::routing::get(get_order))
         .route(
@@ -149,6 +155,98 @@ pub(crate) async fn authorize_or_forbid(
         return Err(ApiError::forbidden());
     }
     Ok(())
+}
+
+fn orders_list_obj() -> &'static str {
+    "/orders/list"
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ListOrdersQuery {
+    /// Page size (default 20, max 100).
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub offset: u32,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct OrderSummaryResponse {
+    pub id: Uuid,
+    pub status: String,
+    pub currency: String,
+    pub total_cents: i64,
+    pub payment_channel: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct PaginatedOrdersResponse {
+    pub items: Vec<OrderSummaryResponse>,
+    pub total: u64,
+    pub limit: u32,
+    pub offset: u32,
+}
+
+fn normalize_order_page_limit(limit: Option<u32>) -> u32 {
+    let raw = limit.unwrap_or(DEFAULT_PAGE_SIZE);
+    raw.clamp(1, MAX_PAGE_SIZE)
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/orders",
+    params(ListOrdersQuery),
+    responses(
+        (status = 200, body = PaginatedOrdersResponse),
+        (status = 401, body = crate::http::error::ProblemDetails),
+        (status = 403, body = crate::http::error::ProblemDetails),
+        (status = 500, body = crate::http::error::ProblemDetails)
+    ),
+    security(("bearerAuth" = []))
+)]
+pub(crate) async fn list_orders(
+    headers: HeaderMap,
+    Extension(state): Extension<AppState>,
+    Query(q): Query<ListOrdersQuery>,
+) -> Result<Json<PaginatedOrdersResponse>, ApiError> {
+    let (actor_sub, customer_id) = require_customer(&headers, &state).await?;
+    authorize_or_forbid(&actor_sub, orders_list_obj(), "read", &actor_sub).await?;
+
+    let limit = normalize_order_page_limit(q.limit);
+    let offset = q.offset;
+
+    let total = order_tbl::Entity::find()
+        .filter(order_tbl::Column::CustomerId.eq(customer_id))
+        .count(&state.db)
+        .await?;
+
+    let rows = order_tbl::Entity::find()
+        .filter(order_tbl::Column::CustomerId.eq(customer_id))
+        .order_by_desc(order_tbl::Column::CreatedAt)
+        .limit(u64::from(limit))
+        .offset(u64::from(offset))
+        .all(&state.db)
+        .await?;
+
+    let items = rows
+        .into_iter()
+        .map(|m| OrderSummaryResponse {
+            id: m.id,
+            status: m.status,
+            currency: m.currency,
+            total_cents: m.total_cents,
+            payment_channel: m.payment_channel,
+            created_at: m.created_at.into(),
+        })
+        .collect();
+
+    Ok(Json(PaginatedOrdersResponse {
+        items,
+        total,
+        limit,
+        offset,
+    }))
 }
 
 #[utoipa::path(

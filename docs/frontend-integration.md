@@ -194,6 +194,20 @@ This API does **not** configure CORS in the snippets shown in `main.rs`. If a **
 
 ---
 
+## Storefront: catalog, profile, order history
+
+| Need | Endpoint | Auth |
+|------|----------|------|
+| Browse / search approved products | `GET /v1/products` (`limit`, `offset`, optional `q`) | No |
+| Product detail (PDP) | `GET /v1/products/{product_id}` | No |
+| Account profile | `GET` / `PATCH /v1/customers/me` | Customer JWT |
+| Order list (summaries) | `GET /v1/orders` (`limit`, `offset`) | Customer JWT |
+| Order detail (lines, totals) | `GET /v1/orders/{order_id}` | Customer JWT |
+
+Use the **list** endpoints for grids and history; use **`GET /v1/orders/{order_id}`** when you need full line items and payment snapshot fields.
+
+---
+
 ## Orders: fields your UI should read
 
 `GET /v1/orders/{order_id}` returns an **`OrderResponse`** (see OpenAPI). Important fields for UI:
