@@ -1,5 +1,7 @@
 use crate::http::error::ApiError;
-use jsonwebtoken::{encode, decode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{
+    decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation,
+};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -30,8 +32,10 @@ pub fn create_access_token(
         exp,
     };
 
+    let header = Header::new(Algorithm::HS256);
+
     encode(
-        &Header::default(),
+        &header,
         &claims,
         &EncodingKey::from_secret(secret.as_bytes()),
     )
@@ -43,7 +47,13 @@ pub fn decode_access_token(
     secret: &str,
     expected_issuer: &str,
 ) -> Result<JwtClaims, ApiError> {
-    let validation = Validation::default();
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.set_issuer(&[expected_issuer]);
+    validation.validate_exp = true;
+    validation.leeway = 60;
+    validation.validate_aud = false;
+    validation.set_required_spec_claims(&["exp", "sub", "iss"]);
+
     let token_data = decode::<JwtClaims>(
         token,
         &DecodingKey::from_secret(secret.as_bytes()),
@@ -51,10 +61,5 @@ pub fn decode_access_token(
     )
     .map_err(|_e| ApiError::unauthorized())?;
 
-    if token_data.claims.iss != expected_issuer {
-        return Err(ApiError::unauthorized());
-    }
-
     Ok(token_data.claims)
 }
-

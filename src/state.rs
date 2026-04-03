@@ -1,4 +1,5 @@
 use crate::http::error::ApiError;
+use crate::http::limits::MIN_JWT_SECRET_BYTES;
 use sea_orm::DatabaseConnection;
 
 #[derive(Clone)]
@@ -13,6 +14,11 @@ impl AppState {
     pub fn from_db(db: DatabaseConnection) -> Result<Self, ApiError> {
         let jwt_secret = std::env::var("JWT_SECRET")
             .map_err(|_| ApiError::internal("JWT_SECRET is not set".to_string()))?;
+        if jwt_secret.len() < MIN_JWT_SECRET_BYTES {
+            return Err(ApiError::internal(format!(
+                "JWT_SECRET must be at least {MIN_JWT_SECRET_BYTES} bytes"
+            )));
+        }
 
         let jwt_issuer = std::env::var("JWT_ISSUER").unwrap_or_else(|_| "lufai_api".to_string());
 

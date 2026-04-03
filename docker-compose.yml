@@ -25,7 +25,7 @@ services:
     environment:
       PORT: "3000"
       DATABASE_URL: postgresql://lufai:lufai@postgres:5432/lufai?sslmode=disable
-      JWT_SECRET: ${JWT_SECRET:-dev-docker-secret-change-me}
+      JWT_SECRET: ${JWT_SECRET:-dev-docker-secret-change-me-min-32b}
       JWT_ISSUER: ${JWT_ISSUER:-lufai_api}
       JWT_ACCESS_TOKEN_TTL_SECS: ${JWT_ACCESS_TOKEN_TTL_SECS:-86400}
       RUST_LOG: ${RUST_LOG:-info}

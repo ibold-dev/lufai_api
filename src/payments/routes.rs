@@ -20,6 +20,7 @@ use hmac::{Hmac, Mac};
 use crate::{
     entity::{orders as order_tbl, payment_attempt, webhook_event},
     http::error::ApiError,
+    http::limits::PAYSTACK_WEBHOOK_BODY_MAX,
     state::AppState,
 };
 
@@ -117,7 +118,7 @@ pub(crate) async fn paystack_webhook(
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR,
     };
 
-    let body_bytes = match axum::body::to_bytes(body, usize::MAX).await {
+    let body_bytes = match axum::body::to_bytes(body, PAYSTACK_WEBHOOK_BODY_MAX).await {
         Ok(bytes) => bytes,
         Err(_) => return StatusCode::BAD_REQUEST,
     };

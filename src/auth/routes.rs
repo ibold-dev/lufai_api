@@ -6,6 +6,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 use uuid::Uuid;
+use validator::Validate;
 
 use crate::{
     auth::{jwt, password},
@@ -23,9 +24,11 @@ pub fn routes() -> Router {
         .route("/admins/auth/login", post(admin_login))
 }
 
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Deserialize, Validate, utoipa::ToSchema)]
 pub struct EmailPasswordRequest {
+    #[validate(email, length(max = 254))]
     pub email: String,
+    #[validate(length(min = 8, max = 256))]
     pub password: String,
 }
 
@@ -37,15 +40,9 @@ pub struct AuthResponse {
     pub subject: String,
 }
 
-fn validate_email(email: &str) -> Result<(), ApiError> {
-    if email.trim().is_empty() {
-        return Err(ApiError::bad_request("email is required"));
-    }
-    // Minimal format check (avoid over-rejecting valid local parts).
-    if !email.contains('@') {
-        return Err(ApiError::bad_request("invalid email"));
-    }
-    Ok(())
+fn validate_credentials(req: &EmailPasswordRequest) -> Result<(), ApiError> {
+    req.validate()
+        .map_err(|_| ApiError::bad_request("invalid email or password"))
 }
 
 #[utoipa::path(
@@ -62,7 +59,7 @@ pub(crate) async fn customer_register(
     Extension(state): Extension<AppState>,
     Json(req): Json<EmailPasswordRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
-    validate_email(&req.email)?;
+    validate_credentials(&req)?;
 
     let password_hash = password::hash_password(&req.password)?;
     let email = req.email.trim();
@@ -119,7 +116,7 @@ pub(crate) async fn customer_login(
     Extension(state): Extension<AppState>,
     Json(req): Json<EmailPasswordRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
-    validate_email(&req.email)?;
+    validate_credentials(&req)?;
     let email = req.email.trim();
 
     let row = customer::Entity::find()
@@ -169,7 +166,7 @@ pub(crate) async fn seller_login(
     Extension(state): Extension<AppState>,
     Json(req): Json<EmailPasswordRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
-    validate_email(&req.email)?;
+    validate_credentials(&req)?;
     let email = req.email.trim();
 
     let row = seller::Entity::find()
@@ -219,7 +216,7 @@ pub(crate) async fn admin_login(
     Extension(state): Extension<AppState>,
     Json(req): Json<EmailPasswordRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
-    validate_email(&req.email)?;
+    validate_credentials(&req)?;
     let email = req.email.trim();
 
     let row = admin::Entity::find()
@@ -260,25 +257,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn validate_email_rejects_empty() {
-        let err = validate_email("").unwrap_err();
-        match err {
-            ApiError::BadRequest(_) => {}
-            _ => panic!("expected BadRequest"),
-        }
+    fn credentials_reject_invalid_email() {
+        let req = EmailPasswordRequest {
+            email: "not-an-email".to_string(),
+            password: "12345678".to_string(),
+        };
+        assert!(validate_credentials(&req).is_err());
     }
 
     #[test]
-    fn validate_email_rejects_without_at() {
-        let err = validate_email("not-an-email").unwrap_err();
-        match err {
-            ApiError::BadRequest(_) => {}
-            _ => panic!("expected BadRequest"),
-        }
+    fn credentials_reject_short_password() {
+        let req = EmailPasswordRequest {
+            email: "user@example.com".to_string(),
+            password: "short".to_string(),
+        };
+        assert!(validate_credentials(&req).is_err());
     }
 
     #[test]
-    fn validate_email_accepts_basic_format() {
-        validate_email("user@example.com").expect("should accept basic email format");
+    fn credentials_accept_valid() {
+        let req = EmailPasswordRequest {
+            email: "user@example.com".to_string(),
+            password: "12345678".to_string(),
+        };
+        validate_credentials(&req).expect("valid credentials");
     }
 }

@@ -15,6 +15,8 @@ use crate::{
         orders as order_tbl, payment_attempt, product,
     },
     http::error::ApiError,
+    http::limits::{MAX_IDEMPOTENCY_KEY_LEN, MAX_LINE_ITEM_QUANTITY, MAX_ORDER_LINE_ITEMS},
+    http::validation::check_json_value_size,
     state::AppState,
 };
 
@@ -118,6 +120,9 @@ fn idempotency_key(headers: &HeaderMap) -> Result<String, ApiError> {
     if key.trim().is_empty() {
         return Err(ApiError::bad_request("Idempotency-Key must not be empty"));
     }
+    if key.len() > MAX_IDEMPOTENCY_KEY_LEN {
+        return Err(ApiError::bad_request("Idempotency-Key is too long"));
+    }
     Ok(key.to_string())
 }
 
@@ -209,8 +214,13 @@ pub(crate) async fn create_order(
     let (actor_sub, customer_id) = require_customer(&headers, &state).await?;
     let idemp_key = idempotency_key(&headers)?;
 
+    check_json_value_size("delivery_address", &req.delivery_address)?;
+
     if req.items.is_empty() {
         return Err(ApiError::bad_request("items must not be empty"));
+    }
+    if req.items.len() > MAX_ORDER_LINE_ITEMS {
+        return Err(ApiError::bad_request("too many line items"));
     }
 
     let mut subtotal_cents: i64 = 0;
@@ -219,6 +229,9 @@ pub(crate) async fn create_order(
     for item in &req.items {
         if item.quantity <= 0 {
             return Err(ApiError::bad_request("quantity must be > 0"));
+        }
+        if item.quantity > MAX_LINE_ITEM_QUANTITY {
+            return Err(ApiError::bad_request("quantity is too large"));
         }
         let p = product::Entity::find_by_id(item.product_id)
             .filter(product::Column::Status.eq("approved"))
@@ -662,7 +675,7 @@ mod tests {
             None => return,
         };
 
-        let jwt_secret = "test_jwt_secret";
+        let jwt_secret = "test_jwt_secret_minimum_32_bytes______";
         let jwt_issuer = "test_jwt_issuer";
         let customer_id = Uuid::new_v4();
         let seller_id = Uuid::new_v4();
@@ -784,7 +797,7 @@ mod tests {
             None => return,
         };
 
-        let jwt_secret = "test_jwt_secret";
+        let jwt_secret = "test_jwt_secret_minimum_32_bytes______";
         let jwt_issuer = "test_jwt_issuer";
         let customer_id = Uuid::new_v4();
         let seller_id = Uuid::new_v4();

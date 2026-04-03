@@ -1,4 +1,5 @@
 use crate::http::error::ApiError;
+use crate::http::limits::MAX_PASSWORD_BYTES;
 use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
@@ -9,6 +10,9 @@ pub fn hash_password(password: &str) -> Result<String, ApiError> {
         return Err(ApiError::bad_request(
             "password must be at least 8 characters".to_string(),
         ));
+    }
+    if password.len() > MAX_PASSWORD_BYTES {
+        return Err(ApiError::bad_request("password is too long".to_string()));
     }
 
     let salt = SaltString::generate(rand_core::OsRng);
@@ -21,6 +25,9 @@ pub fn hash_password(password: &str) -> Result<String, ApiError> {
 }
 
 pub fn verify_password(password_hash: &str, password: &str) -> Result<bool, ApiError> {
+    if password.len() > MAX_PASSWORD_BYTES {
+        return Ok(false);
+    }
     let parsed_hash =
         PasswordHash::new(password_hash).map_err(|e| {
             ApiError::internal(format!("invalid password hash: {e}"))

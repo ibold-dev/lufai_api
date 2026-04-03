@@ -16,6 +16,8 @@ use crate::{
     authz::casbin as casbin_authz,
     entity::product,
     http::error::ApiError,
+    http::limits::{MAX_PRODUCT_DESCRIPTION_LEN, MAX_PRODUCT_TITLE_LEN},
+    http::validation::check_optional_json_value_size,
     state::AppState,
 };
 use casbin::prelude::Enforcer;
@@ -170,6 +172,43 @@ async fn ensure_authorized(
     Ok(())
 }
 
+fn validate_create_product(req: &CreateProductRequest) -> Result<(), ApiError> {
+    if req.title.chars().count() > MAX_PRODUCT_TITLE_LEN {
+        return Err(ApiError::bad_request("title is too long"));
+    }
+    if req.description.chars().count() > MAX_PRODUCT_DESCRIPTION_LEN {
+        return Err(ApiError::bad_request("description is too long"));
+    }
+    check_optional_json_value_size("dimensions", &req.dimensions)?;
+    Ok(())
+}
+
+fn validate_update_product(req: &UpdateProductRequest) -> Result<(), ApiError> {
+    if let Some(ref t) = req.title {
+        if t.trim().is_empty() {
+            return Err(ApiError::bad_request("title must not be empty"));
+        }
+        if t.chars().count() > MAX_PRODUCT_TITLE_LEN {
+            return Err(ApiError::bad_request("title is too long"));
+        }
+    }
+    if let Some(ref d) = req.description {
+        if d.trim().is_empty() {
+            return Err(ApiError::bad_request("description must not be empty"));
+        }
+        if d.chars().count() > MAX_PRODUCT_DESCRIPTION_LEN {
+            return Err(ApiError::bad_request("description is too long"));
+        }
+    }
+    if let Some(p) = req.price_cents
+        && p < 0
+    {
+        return Err(ApiError::bad_request("price_cents must be >= 0"));
+    }
+    check_optional_json_value_size("dimensions", &req.dimensions)?;
+    Ok(())
+}
+
 fn model_to_response(m: product::Model) -> ProductResponse {
     ProductResponse {
         id: m.id,
@@ -213,6 +252,8 @@ pub(crate) async fn create_product(
         &actor_sub,
     )
     .await?;
+
+    validate_create_product(&req)?;
 
     if req.title.trim().is_empty() {
         return Err(ApiError::bad_request("title is required"));
@@ -313,6 +354,8 @@ pub(crate) async fn update_product(
         &actor_sub,
     )
     .await?;
+
+    validate_update_product(&req)?;
 
     let existing = product::Entity::find()
         .filter(product::Column::Id.eq(product_id))
