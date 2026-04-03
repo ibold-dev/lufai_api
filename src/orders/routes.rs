@@ -47,7 +47,11 @@ pub struct CreateOrderRequest {
 pub struct OrderItemResponse {
     pub product_id: Uuid,
     pub quantity: i32,
+    /// Catalog unit price before promotion.
+    pub list_unit_price_cents: i64,
+    /// Charged unit price after best applicable promotion.
     pub unit_price_cents: i64,
+    pub promotion_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]

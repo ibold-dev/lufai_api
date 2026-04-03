@@ -9,7 +9,11 @@ pub struct Model {
     pub id: Uuid,
     pub order_id: Uuid,
     pub product_id: Uuid,
+    /// Catalog unit price at checkout (before promotion).
+    pub list_unit_price_cents: i64,
+    /// Final charged unit price after best applicable promotion.
     pub unit_price_cents: i64,
+    pub promotion_id: Option<Uuid>,
     pub quantity: i32,
     pub created_at: DateTimeUtc,
 }

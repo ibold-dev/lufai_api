@@ -12,5 +12,7 @@ pub mod orders;
 pub mod payment_attempt;
 pub mod product;
 pub mod product_image;
+pub mod promotion;
+pub mod promotion_product;
 pub mod seller;
 pub mod webhook_event;

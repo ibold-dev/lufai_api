@@ -57,7 +57,17 @@ impl Modify for SecurityAddon {
         crate::cart::routes::delete_cart_item,
         crate::cart::routes::checkout_cart,
         crate::orders::routes::initialize_paystack,
-        crate::payments::routes::paystack_webhook
+        crate::payments::routes::paystack_webhook,
+        crate::promotions::routes::create_seller_promotion,
+        crate::promotions::routes::list_seller_promotions,
+        crate::promotions::routes::get_seller_promotion,
+        crate::promotions::routes::update_seller_promotion,
+        crate::promotions::routes::delete_seller_promotion,
+        crate::promotions::routes::create_admin_promotion,
+        crate::promotions::routes::list_admin_promotions,
+        crate::promotions::routes::get_admin_promotion,
+        crate::promotions::routes::update_admin_promotion,
+        crate::promotions::routes::delete_admin_promotion
     )
 )]
 pub struct ApiDoc;

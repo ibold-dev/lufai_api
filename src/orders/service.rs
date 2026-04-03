@@ -9,11 +9,12 @@ use crate::{
     authz::casbin as casbin_authz,
     db::db_err_is_unique_violation,
     entity::{
-        cart, cart_item, customer_order_idempotency, order_item, orders as order_tbl, product,
+        cart, cart_item, customer_order_idempotency, order_item, orders as order_tbl,
     },
     http::error::ApiError,
     http::limits::{MAX_LINE_ITEM_QUANTITY, MAX_ORDER_LINE_ITEMS},
     http::validation::check_json_value_size,
+    promotions::pricing,
     state::AppState,
 };
 
@@ -77,7 +78,9 @@ pub async fn fetch_order_with_items(
         .map(|r| OrderItemResponse {
             product_id: r.product_id,
             quantity: r.quantity,
+            list_unit_price_cents: r.list_unit_price_cents,
             unit_price_cents: r.unit_price_cents,
+            promotion_id: r.promotion_id,
         })
         .collect();
 
@@ -114,28 +117,30 @@ pub async fn create_order_from_request(
         return Err(ApiError::bad_request("too many line items"));
     }
 
+    let line_inputs: Vec<(Uuid, i32)> = req
+        .items
+        .iter()
+        .map(|i| {
+            if i.quantity <= 0 {
+                return Err(ApiError::bad_request("quantity must be > 0"));
+            }
+            if i.quantity > MAX_LINE_ITEM_QUANTITY {
+                return Err(ApiError::bad_request("quantity is too large"));
+            }
+            Ok((i.product_id, i.quantity))
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+
+    let priced_lines = pricing::price_order_lines(&state.db, &line_inputs).await?;
+
     let mut subtotal_cents: i64 = 0;
-    let mut items_to_insert: Vec<(Uuid, i32, i64)> = Vec::with_capacity(req.items.len());
-
-    for item in &req.items {
-        if item.quantity <= 0 {
-            return Err(ApiError::bad_request("quantity must be > 0"));
-        }
-        if item.quantity > MAX_LINE_ITEM_QUANTITY {
-            return Err(ApiError::bad_request("quantity is too large"));
-        }
-        let p = product::Entity::find_by_id(item.product_id)
-            .filter(product::Column::Status.eq("approved"))
-            .one(&state.db)
-            .await?
-            .ok_or_else(|| ApiError::bad_request("product not available"))?;
-
-        let unit_price_cents = p.price_cents;
+    for pl in &priced_lines {
         subtotal_cents = subtotal_cents
-            .checked_add(unit_price_cents.saturating_mul(item.quantity as i64))
+            .checked_add(
+                pl.unit_price_cents
+                    .saturating_mul(pl.quantity as i64),
+            )
             .ok_or_else(|| ApiError::bad_request("subtotal overflow"))?;
-
-        items_to_insert.push((item.product_id, item.quantity, unit_price_cents));
     }
 
     let shipping_cents = req.shipping_cents.unwrap_or(0);
@@ -178,13 +183,15 @@ pub async fn create_order_from_request(
     };
     order_tbl::Entity::insert(order_am).exec(&tx).await?;
 
-    for (product_id, quantity, unit_price_cents) in items_to_insert {
+    for pl in priced_lines {
         let oi = order_item::ActiveModel {
             id: Set(Uuid::new_v4()),
             order_id: Set(order_id),
-            product_id: Set(product_id),
-            unit_price_cents: Set(unit_price_cents),
-            quantity: Set(quantity),
+            product_id: Set(pl.product_id),
+            list_unit_price_cents: Set(pl.list_unit_price_cents),
+            unit_price_cents: Set(pl.unit_price_cents),
+            promotion_id: Set(pl.promotion_id),
+            quantity: Set(pl.quantity),
             created_at: Set(now),
         };
         order_item::Entity::insert(oi).exec(&tx).await?;

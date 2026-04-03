@@ -17,3 +17,15 @@ p, role:customer, /cart/items, update, self
 p, role:customer, /cart/items/*, update, self
 p, role:customer, /cart/checkout, create, self
 
+p, role:seller, /promotions/list, read, self
+p, role:seller, /promotions/list, create, self
+p, role:seller, /promotions/*, read, self
+p, role:seller, /promotions/*, update, self
+p, role:seller, /promotions/*, delete, self
+
+p, role:admin, /admin/promotions/list, read, any
+p, role:admin, /admin/promotions/list, create, any
+p, role:admin, /admin/promotions/*, read, any
+p, role:admin, /admin/promotions/*, update, any
+p, role:admin, /admin/promotions/*, delete, any
+

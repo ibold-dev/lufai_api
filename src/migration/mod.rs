@@ -6,6 +6,7 @@ mod m20260403000002_full_names;
 mod m20260403000003_affiliates;
 mod m20260403000004_carts;
 mod m20260403000005_product_images;
+mod m20260403000006_promotions;
 
 use sea_orm_migration::prelude::*;
 
@@ -21,6 +22,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260403000003_affiliates::Migration),
             Box::new(m20260403000004_carts::Migration),
             Box::new(m20260403000005_product_images::Migration),
+            Box::new(m20260403000006_promotions::Migration),
         ]
     }
 }

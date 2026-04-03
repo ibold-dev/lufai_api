@@ -41,3 +41,9 @@ pub const MIN_JWT_SECRET_BYTES: usize = 32;
 
 /// Public affiliate / referral code (stored uppercase in DB; max length in migration `CHECK`).
 pub const MAX_AFFILIATE_CODE_LEN: usize = 32;
+
+/// Promotion / campaign name.
+pub const MAX_PROMOTION_NAME_LEN: usize = 200;
+
+/// Max products linked to a single promotion (abuse mitigation).
+pub const MAX_PROMOTION_PRODUCT_IDS: usize = 500;
