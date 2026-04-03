@@ -337,8 +337,8 @@ mod tests {
             password_hash: Set("dummy_hash".into()),
             phone: Set(None),
             address: Set(None),
-            created_at: Set(now.into()),
-            updated_at: Set(now.into()),
+            created_at: Set(now),
+            updated_at: Set(now),
         })
         .exec(&db)
         .await
@@ -355,9 +355,9 @@ mod tests {
             shipping_cents: Set(0),
             tax_cents: Set(0),
             total_cents: Set(amount_cents),
-            delivery_address: Set(serde_json::json!({}).into()),
-            created_at: Set(now.into()),
-            updated_at: Set(now.into()),
+            delivery_address: Set(serde_json::json!({})),
+            created_at: Set(now),
+            updated_at: Set(now),
         })
         .exec(&db)
         .await
@@ -377,12 +377,11 @@ mod tests {
                 serde_json::json!({
                     "authorization_url": "https://example.com/auth",
                     "access_code": "ACME"
-                })
-                .into(),
+                }),
             )),
             paid_at: Set(None),
-            created_at: Set(now.into()),
-            updated_at: Set(now.into()),
+            created_at: Set(now),
+            updated_at: Set(now),
         })
         .exec(&db)
         .await

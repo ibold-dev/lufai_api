@@ -673,8 +673,8 @@ mod tests {
             id: Set(seller_id),
             email: Set(format!("seller+{}@example.com", Uuid::new_v4())),
             password_hash: Set("dummy_hash".into()),
-            created_at: Set(now.into()),
-            updated_at: Set(now.into()),
+            created_at: Set(now),
+            updated_at: Set(now),
         })
         .exec(&db)
         .await
@@ -689,8 +689,8 @@ mod tests {
             currency: Set("NGN".into()),
             dimensions: Set(None),
             status: Set("approved".into()),
-            created_at: Set(now.into()),
-            updated_at: Set(now.into()),
+            created_at: Set(now),
+            updated_at: Set(now),
         })
         .exec(&db)
         .await
@@ -702,8 +702,8 @@ mod tests {
             password_hash: Set("dummy_hash".into()),
             phone: Set(None),
             address: Set(None),
-            created_at: Set(now.into()),
-            updated_at: Set(now.into()),
+            created_at: Set(now),
+            updated_at: Set(now),
         })
         .exec(&db)
         .await
@@ -796,8 +796,8 @@ mod tests {
             id: Set(seller_id),
             email: Set(format!("seller+{}@example.com", Uuid::new_v4())),
             password_hash: Set("dummy_hash".into()),
-            created_at: Set(now.into()),
-            updated_at: Set(now.into()),
+            created_at: Set(now),
+            updated_at: Set(now),
         })
         .exec(&db)
         .await
@@ -812,8 +812,8 @@ mod tests {
             currency: Set("NGN".into()),
             dimensions: Set(None),
             status: Set("approved".into()),
-            created_at: Set(now.into()),
-            updated_at: Set(now.into()),
+            created_at: Set(now),
+            updated_at: Set(now),
         })
         .exec(&db)
         .await
@@ -825,8 +825,8 @@ mod tests {
             password_hash: Set("dummy_hash".into()),
             phone: Set(None),
             address: Set(None),
-            created_at: Set(now.into()),
-            updated_at: Set(now.into()),
+            created_at: Set(now),
+            updated_at: Set(now),
         })
         .exec(&db)
         .await
@@ -842,9 +842,9 @@ mod tests {
             shipping_cents: Set(0),
             tax_cents: Set(0),
             total_cents: Set(amount_cents),
-            delivery_address: Set(serde_json::json!({}).into()),
-            created_at: Set(now.into()),
-            updated_at: Set(now.into()),
+            delivery_address: Set(serde_json::json!({})),
+            created_at: Set(now),
+            updated_at: Set(now),
         })
         .exec(&db)
         .await
@@ -884,12 +884,11 @@ mod tests {
                     "authorization_url": "https://example.com/auth",
                     "access_code": "ACME",
                     "reference": paystack_reference.clone()
-                })
-                .into(),
+                }),
             )),
             paid_at: Set(None),
-            created_at: Set(now.into()),
-            updated_at: Set(now.into()),
+            created_at: Set(now),
+            updated_at: Set(now),
         })
         .exec(&db)
         .await
@@ -900,7 +899,7 @@ mod tests {
             order_id: Set(order_id),
             idempotency_key: Set(idempotency_key.clone()),
             payment_attempt_id: Set(payment_attempt_id),
-            created_at: Set(now.into()),
+            created_at: Set(now),
         })
         .exec(&db)
         .await
