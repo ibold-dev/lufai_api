@@ -145,13 +145,7 @@ pub async fn create_order_from_request(
     }
     let total_cents = subtotal_cents + shipping_cents + tax_cents;
 
-    authorize_or_forbid(
-        actor_sub,
-        &orders_collection_obj(),
-        "create",
-        actor_sub,
-    )
-    .await?;
+    authorize_or_forbid(actor_sub, &orders_collection_obj(), "create", actor_sub).await?;
 
     let tx = state.db.begin().await?;
 
@@ -204,7 +198,10 @@ pub async fn create_order_from_request(
         created_at: Set(now),
     };
 
-    match customer_order_idempotency::Entity::insert(map_am).exec(&tx).await {
+    match customer_order_idempotency::Entity::insert(map_am)
+        .exec(&tx)
+        .await
+    {
         Ok(_) => {
             if clear_customer_cart {
                 clear_cart_items_tx(&tx, customer_id).await?;
