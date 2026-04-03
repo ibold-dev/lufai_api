@@ -1,9 +1,9 @@
 use axum::{Json, Router, extract::Extension, http::HeaderMap, routing::post};
-use serde::{Deserialize, Serialize};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
     QueryOrder, Set, TransactionTrait,
 };
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
@@ -89,9 +89,7 @@ fn bearer_token(headers: &HeaderMap) -> Result<String, ApiError> {
 }
 
 fn principal_from_sub(sub: &str) -> Result<(String, Uuid), ApiError> {
-    let (prefix, id_str) = sub
-        .split_once(':')
-        .ok_or_else(ApiError::unauthorized)?;
+    let (prefix, id_str) = sub.split_once(':').ok_or_else(ApiError::unauthorized)?;
     let id = Uuid::parse_str(id_str).map_err(|_| ApiError::unauthorized())?;
     Ok((prefix.to_string(), id))
 }
@@ -322,7 +320,9 @@ pub(crate) async fn create_order(
                 .filter(customer_order_idempotency::Column::IdempotencyKey.eq(&idemp_key))
                 .one(&state.db)
                 .await?
-                .ok_or_else(|| ApiError::internal("idempotency row missing after conflict".to_string()))?;
+                .ok_or_else(|| {
+                    ApiError::internal("idempotency row missing after conflict".to_string())
+                })?;
             let existing_order_id = row.order_id;
             let order = fetch_order_with_items(&state.db, customer_id, existing_order_id).await?;
             return Ok(Json(order));
@@ -401,9 +401,7 @@ async fn wait_for_payment_attempt(
         let order_id = row.order_id;
 
         if status == "initialized" {
-            let Some(raw_payload): Option<serde_json::Value> =
-                row.raw_payload
-            else {
+            let Some(raw_payload): Option<serde_json::Value> = row.raw_payload else {
                 return Err(ApiError::internal(
                     "missing raw_payload for initialized attempt".to_string(),
                 ));
@@ -589,11 +587,12 @@ pub(crate) async fn initialize_paystack(
 
     if !res.status {
         let message = res.message.clone();
-        let mut pa: payment_attempt::ActiveModel = payment_attempt::Entity::find_by_id(payment_attempt_id)
-            .one(&state.db)
-            .await?
-            .ok_or_else(|| ApiError::internal("payment attempt missing".to_string()))?
-            .into_active_model();
+        let mut pa: payment_attempt::ActiveModel =
+            payment_attempt::Entity::find_by_id(payment_attempt_id)
+                .one(&state.db)
+                .await?
+                .ok_or_else(|| ApiError::internal("payment attempt missing".to_string()))?
+                .into_active_model();
         pa.status = Set("failed".to_string());
         pa.raw_payload = Set(Some(serde_json::json!({ "error": message })));
         pa.updated_at = Set(chrono::Utc::now());
@@ -612,11 +611,12 @@ pub(crate) async fn initialize_paystack(
         "reference": reference,
     });
 
-    let mut pa: payment_attempt::ActiveModel = payment_attempt::Entity::find_by_id(payment_attempt_id)
-        .one(&state.db)
-        .await?
-        .ok_or_else(|| ApiError::internal("payment attempt missing".to_string()))?
-        .into_active_model();
+    let mut pa: payment_attempt::ActiveModel =
+        payment_attempt::Entity::find_by_id(payment_attempt_id)
+            .one(&state.db)
+            .await?
+            .ok_or_else(|| ApiError::internal("payment attempt missing".to_string()))?
+            .into_active_model();
     pa.status = Set("initialized".to_string());
     pa.raw_payload = Set(Some(raw_payload));
     pa.updated_at = Set(chrono::Utc::now());
@@ -642,9 +642,9 @@ pub(crate) async fn initialize_paystack(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::header::HeaderValue;
     use crate::entity::seller;
     use crate::migration::Migrator;
+    use axum::http::header::HeaderValue;
     use sea_orm::{PaginatorTrait, Set, SqlxPostgresConnector};
     use sea_orm_migration::MigratorTrait;
     use sqlx::postgres::PgPoolOptions;
@@ -716,6 +716,7 @@ mod tests {
             password_hash: Set(Some("dummy_hash".into())),
             google_sub: Set(None),
             full_name: Set("Test Customer".into()),
+            affiliate_id: Set(None),
             phone: Set(None),
             address: Set(None),
             created_at: Set(now),
@@ -761,21 +762,16 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             "Authorization",
-            HeaderValue::from_str(&format!("Bearer {access_token}"))
-                .expect("header value"),
+            HeaderValue::from_str(&format!("Bearer {access_token}")).expect("header value"),
         );
         headers.insert(
             "Idempotency-Key",
             HeaderValue::from_str(&idempotency_key).expect("header value"),
         );
 
-        let order_1 = create_order(
-            headers.clone(),
-            Extension(state.clone()),
-            Json(req.clone()),
-        )
-        .await
-        .expect("create order");
+        let order_1 = create_order(headers.clone(), Extension(state.clone()), Json(req.clone()))
+            .await
+            .expect("create order");
 
         let order_2 = create_order(headers, Extension(state), Json(req))
             .await
@@ -844,6 +840,7 @@ mod tests {
             password_hash: Set(Some("dummy_hash".into())),
             google_sub: Set(None),
             full_name: Set("Test Customer".into()),
+            affiliate_id: Set(None),
             phone: Set(None),
             address: Set(None),
             created_at: Set(now),
@@ -902,13 +899,11 @@ mod tests {
             amount_cents: Set(amount_cents),
             currency: Set("NGN".into()),
             status: Set("initialized".into()),
-            raw_payload: Set(Some(
-                serde_json::json!({
-                    "authorization_url": "https://example.com/auth",
-                    "access_code": "ACME",
-                    "reference": paystack_reference.clone()
-                }),
-            )),
+            raw_payload: Set(Some(serde_json::json!({
+                "authorization_url": "https://example.com/auth",
+                "access_code": "ACME",
+                "reference": paystack_reference.clone()
+            }))),
             paid_at: Set(None),
             created_at: Set(now),
             updated_at: Set(now),
@@ -931,8 +926,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             "Authorization",
-            HeaderValue::from_str(&format!("Bearer {access_token}"))
-                .expect("header value"),
+            HeaderValue::from_str(&format!("Bearer {access_token}")).expect("header value"),
         );
         headers.insert(
             "Idempotency-Key",
@@ -947,20 +941,13 @@ mod tests {
         .await
         .expect("initialize paystack");
 
-        let init_2 = initialize_paystack(
-            headers,
-            Extension(state),
-            axum::extract::Path(order_id),
-        )
-        .await
-        .expect("initialize paystack second time");
+        let init_2 = initialize_paystack(headers, Extension(state), axum::extract::Path(order_id))
+            .await
+            .expect("initialize paystack second time");
 
         assert_eq!(init_1.0.paystack_reference, init_2.0.paystack_reference);
         assert_eq!(init_1.0.access_code, init_2.0.access_code);
-        assert_eq!(
-            init_1.0.authorization_url,
-            init_2.0.authorization_url,
-        );
+        assert_eq!(init_1.0.authorization_url, init_2.0.authorization_url,);
 
         let attempt_count = payment_attempt::Entity::find()
             .filter(payment_attempt::Column::Id.eq(payment_attempt_id))

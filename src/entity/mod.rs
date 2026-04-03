@@ -1,6 +1,7 @@
 //! SeaORM entities for the marketplace schema.
 
 pub mod admin;
+pub mod affiliate;
 pub mod customer;
 pub mod customer_order_idempotency;
 pub mod order_item;

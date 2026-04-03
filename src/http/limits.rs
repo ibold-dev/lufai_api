@@ -29,3 +29,6 @@ pub const MAX_PASSWORD_BYTES: usize = 256;
 
 /// Minimum JWT signing secret length (bytes).
 pub const MIN_JWT_SECRET_BYTES: usize = 32;
+
+/// Public affiliate / referral code (stored uppercase in DB; max length in migration `CHECK`).
+pub const MAX_AFFILIATE_CODE_LEN: usize = 32;

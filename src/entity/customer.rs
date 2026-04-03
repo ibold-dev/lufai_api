@@ -15,6 +15,8 @@ pub struct Model {
     #[sea_orm(unique)]
     pub google_sub: Option<String>,
     pub full_name: String,
+    /// Set only when the customer signs up with a valid affiliate code; never updated afterward.
+    pub affiliate_id: Option<Uuid>,
     pub phone: Option<String>,
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub address: Option<Json>,
@@ -23,6 +25,13 @@ pub struct Model {
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {}
+pub enum Relation {
+    #[sea_orm(
+        belongs_to = "super::affiliate::Entity",
+        from = "Column::AffiliateId",
+        to = "super::affiliate::Column::Id"
+    )]
+    Affiliate,
+}
 
 impl ActiveModelBehavior for ActiveModel {}

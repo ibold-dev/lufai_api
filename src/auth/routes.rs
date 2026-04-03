@@ -9,10 +9,11 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::{
-    auth::{google, jwt, password},
+    auth::{affiliate, google, jwt, password},
     db::db_err_is_unique_violation,
     entity::{admin, customer, seller},
     http::error::ApiError,
+    http::limits::MAX_AFFILIATE_CODE_LEN,
     state::AppState,
 };
 
@@ -41,6 +42,9 @@ pub struct CustomerRegisterRequest {
     pub password: String,
     #[validate(length(min = 1, max = 200))]
     pub full_name: String,
+    /// Optional affiliate / referral code (applied only on this signup; cannot be changed later).
+    #[serde(default)]
+    pub affiliate_code: Option<String>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -57,6 +61,9 @@ pub struct GoogleSignInRequest {
     #[validate(length(min = 10, max = 12000))]
     #[serde(alias = "credential")]
     pub id_token: String,
+    /// Optional; only used when creating a new customer (first Google sign-up). Ignored for returning users.
+    #[serde(default)]
+    pub affiliate_code: Option<String>,
 }
 
 fn issue_customer_token(state: &AppState, customer_id: Uuid) -> Result<Json<AuthResponse>, ApiError> {
@@ -82,7 +89,13 @@ fn validate_credentials(req: &EmailPasswordRequest) -> Result<(), ApiError> {
 
 fn validate_customer_register(req: &CustomerRegisterRequest) -> Result<(), ApiError> {
     req.validate()
-        .map_err(|_| ApiError::bad_request("invalid registration data"))
+        .map_err(|_| ApiError::bad_request("invalid registration data"))?;
+    if let Some(ref c) = req.affiliate_code {
+        if c.trim().len() > MAX_AFFILIATE_CODE_LEN {
+            return Err(ApiError::bad_request("affiliate code is too long"));
+        }
+    }
+    Ok(())
 }
 
 #[utoipa::path(
@@ -104,6 +117,8 @@ pub(crate) async fn customer_register(
     let password_hash = password::hash_password(&req.password)?;
     let email = req.email.trim().to_lowercase();
     let full_name = req.full_name.trim().to_string();
+    let affiliate_id =
+        affiliate::resolve_affiliate_id_for_signup(&state.db, req.affiliate_code.as_deref()).await?;
 
     let customer_id = Uuid::new_v4();
     let now = chrono::Utc::now();
@@ -113,6 +128,7 @@ pub(crate) async fn customer_register(
         password_hash: Set(Some(password_hash)),
         google_sub: Set(None),
         full_name: Set(full_name),
+        affiliate_id: Set(affiliate_id),
         phone: Set(None),
         address: Set(None),
         created_at: Set(now),
@@ -149,6 +165,11 @@ pub(crate) async fn customer_google_sign_in(
 ) -> Result<Json<AuthResponse>, ApiError> {
     req.validate()
         .map_err(|_| ApiError::bad_request("invalid request"))?;
+    if let Some(ref c) = req.affiliate_code {
+        if c.trim().len() > MAX_AFFILIATE_CODE_LEN {
+            return Err(ApiError::bad_request("affiliate code is too long"));
+        }
+    }
     let google_client_id = state.google_client_id.as_ref().ok_or_else(|| {
         ApiError::internal("Google sign-in is not configured (set GOOGLE_CLIENT_ID)".to_string())
     })?;
@@ -197,6 +218,12 @@ pub(crate) async fn customer_google_sign_in(
         return issue_customer_token(&state, cid);
     }
 
+    let affiliate_id = affiliate::resolve_affiliate_id_for_signup(
+        &state.db,
+        req.affiliate_code.as_deref(),
+    )
+    .await?;
+
     let customer_id = Uuid::new_v4();
     let now = chrono::Utc::now();
     customer::Entity::insert(customer::ActiveModel {
@@ -205,6 +232,7 @@ pub(crate) async fn customer_google_sign_in(
         password_hash: Set(None),
         google_sub: Set(Some(claims.sub)),
         full_name: Set(google_full_name),
+        affiliate_id: Set(affiliate_id),
         phone: Set(None),
         address: Set(None),
         created_at: Set(now),

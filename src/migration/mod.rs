@@ -3,6 +3,7 @@
 mod m20260403000000_init;
 mod m20260403000001_customer_google_auth;
 mod m20260403000002_full_names;
+mod m20260403000003_affiliates;
 
 use sea_orm_migration::prelude::*;
 
@@ -15,6 +16,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260403000000_init::Migration),
             Box::new(m20260403000001_customer_google_auth::Migration),
             Box::new(m20260403000002_full_names::Migration),
+            Box::new(m20260403000003_affiliates::Migration),
         ]
     }
 }
