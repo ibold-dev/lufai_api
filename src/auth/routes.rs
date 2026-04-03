@@ -90,10 +90,10 @@ fn validate_credentials(req: &EmailPasswordRequest) -> Result<(), ApiError> {
 fn validate_customer_register(req: &CustomerRegisterRequest) -> Result<(), ApiError> {
     req.validate()
         .map_err(|_| ApiError::bad_request("invalid registration data"))?;
-    if let Some(ref c) = req.affiliate_code {
-        if c.trim().len() > MAX_AFFILIATE_CODE_LEN {
-            return Err(ApiError::bad_request("affiliate code is too long"));
-        }
+    if let Some(ref c) = req.affiliate_code
+        && c.trim().len() > MAX_AFFILIATE_CODE_LEN
+    {
+        return Err(ApiError::bad_request("affiliate code is too long"));
     }
     Ok(())
 }
@@ -165,10 +165,10 @@ pub(crate) async fn customer_google_sign_in(
 ) -> Result<Json<AuthResponse>, ApiError> {
     req.validate()
         .map_err(|_| ApiError::bad_request("invalid request"))?;
-    if let Some(ref c) = req.affiliate_code {
-        if c.trim().len() > MAX_AFFILIATE_CODE_LEN {
-            return Err(ApiError::bad_request("affiliate code is too long"));
-        }
+    if let Some(ref c) = req.affiliate_code
+        && c.trim().len() > MAX_AFFILIATE_CODE_LEN
+    {
+        return Err(ApiError::bad_request("affiliate code is too long"));
     }
     let google_client_id = state.google_client_id.as_ref().ok_or_else(|| {
         ApiError::internal("Google sign-in is not configured (set GOOGLE_CLIENT_ID)".to_string())

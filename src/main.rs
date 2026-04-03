@@ -9,6 +9,7 @@ mod orders;
 mod payments;
 mod state;
 mod openapi;
+mod cart;
 
 use axum::extract::DefaultBodyLimit;
 use axum::Extension;
@@ -69,6 +70,7 @@ async fn main() -> Result<(), ApiError> {
     let v1_business = axum::Router::new()
         .merge(products::routes::routes())
         .merge(orders::routes::routes())
+        .merge(cart::routes::routes())
         .merge(payments::routes::routes())
         .layer(governor_default_api());
 

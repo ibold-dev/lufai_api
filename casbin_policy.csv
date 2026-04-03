@@ -12,3 +12,8 @@ p, role:customer, /orders/*, read, self
 p, role:customer, /orders/*, create, self
 p, role:customer, /orders/*, pay, self
 
+p, role:customer, /cart, read, self
+p, role:customer, /cart/items, update, self
+p, role:customer, /cart/items/*, update, self
+p, role:customer, /cart/checkout, create, self
+

@@ -52,6 +52,10 @@ impl Modify for SecurityAddon {
         crate::products::routes::reject_product,
         crate::orders::routes::create_order,
         crate::orders::routes::get_order,
+        crate::cart::routes::get_cart,
+        crate::cart::routes::put_cart_item,
+        crate::cart::routes::delete_cart_item,
+        crate::cart::routes::checkout_cart,
         crate::orders::routes::initialize_paystack,
         crate::payments::routes::paystack_webhook
     )
