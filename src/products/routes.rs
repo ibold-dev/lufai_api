@@ -20,6 +20,7 @@ use crate::{
 };
 use casbin::prelude::Enforcer;
 
+/// Axum 0.8+ path captures must use `{name}` syntax, not `:name`.
 pub fn routes() -> Router {
     Router::new()
         // Seller product ads
@@ -29,11 +30,11 @@ pub fn routes() -> Router {
             axum::routing::get(list_my_products),
         )
         .route(
-            "/sellers/me/products/:product_id",
+            "/sellers/me/products/{product_id}",
             patch(update_product),
         )
         .route(
-            "/sellers/me/products/:product_id",
+            "/sellers/me/products/{product_id}",
             delete(delete_product),
         )
         // Admin moderation
@@ -42,11 +43,11 @@ pub fn routes() -> Router {
             axum::routing::get(list_pending_products),
         )
         .route(
-            "/admin/products/:product_id/approve",
+            "/admin/products/{product_id}/approve",
             post(approve_product),
         )
         .route(
-            "/admin/products/:product_id/reject",
+            "/admin/products/{product_id}/reject",
             post(reject_product),
         )
 }

@@ -24,9 +24,9 @@ use sha2::{Digest, Sha256};
 pub fn routes() -> Router {
     Router::new()
         .route("/orders", post(create_order))
-        .route("/orders/:order_id", axum::routing::get(get_order))
+        .route("/orders/{order_id}", axum::routing::get(get_order))
         .route(
-            "/orders/:order_id/paystack/initialize",
+            "/orders/{order_id}/paystack/initialize",
             post(initialize_paystack),
         )
 }

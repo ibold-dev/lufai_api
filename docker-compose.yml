@@ -1,0 +1,41 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lufai
+      POSTGRES_PASSWORD: lufai
+      POSTGRES_DB: lufai
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lufai -d lufai"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
+    ports:
+      - "5433:5433"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        CACHE_BUST: "2"
+    environment:
+      PORT: "3000"
+      DATABASE_URL: postgresql://lufai:lufai@postgres:5432/lufai?sslmode=disable
+      JWT_SECRET: ${JWT_SECRET:-dev-docker-secret-change-me}
+      JWT_ISSUER: ${JWT_ISSUER:-lufai_api}
+      JWT_ACCESS_TOKEN_TTL_SECS: ${JWT_ACCESS_TOKEN_TTL_SECS:-86400}
+      RUST_LOG: ${RUST_LOG:-info}
+      PAYSTACK_SECRET_KEY: ${PAYSTACK_SECRET_KEY:-}
+      PAYSTACK_CALLBACK_URL: ${PAYSTACK_CALLBACK_URL:-}
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

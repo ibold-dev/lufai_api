@@ -53,7 +53,7 @@ async fn main() -> Result<(), ApiError> {
         .layer(Extension(state))
         .layer(TraceLayer::new_for_http());
 
-    let swagger_ui = SwaggerUi::new("/v1/docs/{_:.*}")
+    let swagger_ui = SwaggerUi::new("/v1/docs")
         .url("/v1/openapi.json", openapi::ApiDoc::openapi());
     let swagger_router: axum::Router<()> = axum::Router::from(swagger_ui);
     let app = app.merge(swagger_router);
