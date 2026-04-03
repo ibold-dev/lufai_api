@@ -1,10 +1,22 @@
 use axum::{Json, Router, extract::Extension, http::HeaderMap, routing::post};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
-use sqlx::Row;
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
+    QueryOrder, Set, TransactionTrait,
+};
 use uuid::Uuid;
 
-use crate::{auth::jwt, authz::casbin as casbin_authz, http::error::ApiError, state::AppState};
+use crate::{
+    auth::jwt,
+    authz::casbin as casbin_authz,
+    db::db_err_is_unique_violation,
+    entity::{
+        customer, customer_order_idempotency, order_item, order_payment_idempotency,
+        orders as order_tbl, payment_attempt, product,
+    },
+    http::error::ApiError,
+    state::AppState,
+};
 
 use paystack::{Currency, PaystackClient, ReqwestClient, TransactionRequestBuilder};
 use sha2::{Digest, Sha256};
@@ -133,50 +145,41 @@ async fn authorize_or_forbid(
 }
 
 async fn fetch_order_with_items(
-    pool: &PgPool,
+    db: &DatabaseConnection,
     customer_id: Uuid,
     order_id: Uuid,
 ) -> Result<OrderResponse, ApiError> {
-    let order_row = sqlx::query(
-        "SELECT id, customer_id, status, currency, subtotal_cents, shipping_cents, tax_cents, total_cents, delivery_address
-         FROM orders WHERE id = $1 AND customer_id = $2",
-    )
-    .bind(order_id)
-    .bind(customer_id)
-    .fetch_optional(pool)
-    .await?;
+    let order_row = order_tbl::Entity::find_by_id(order_id)
+        .filter(order_tbl::Column::CustomerId.eq(customer_id))
+        .one(db)
+        .await?
+        .ok_or_else(|| ApiError::not_found("order not found"))?;
 
-    let Some(order_row) = order_row else {
-        return Err(ApiError::not_found("order not found"));
-    };
+    let items_rows = order_item::Entity::find()
+        .filter(order_item::Column::OrderId.eq(order_id))
+        .order_by_asc(order_item::Column::CreatedAt)
+        .all(db)
+        .await?;
 
-    let items_rows = sqlx::query(
-        "SELECT oi.product_id, oi.quantity, oi.unit_price_cents
-         FROM order_items oi WHERE oi.order_id = $1 ORDER BY oi.created_at ASC",
-    )
-    .bind(order_id)
-    .fetch_all(pool)
-    .await?;
-
-    let mut items = Vec::with_capacity(items_rows.len());
-    for row in items_rows {
-        items.push(OrderItemResponse {
-            product_id: row.try_get("product_id")?,
-            quantity: row.try_get("quantity")?,
-            unit_price_cents: row.try_get("unit_price_cents")?,
-        });
-    }
+    let items = items_rows
+        .into_iter()
+        .map(|r| OrderItemResponse {
+            product_id: r.product_id,
+            quantity: r.quantity,
+            unit_price_cents: r.unit_price_cents,
+        })
+        .collect();
 
     Ok(OrderResponse {
-        id: order_row.try_get("id")?,
-        customer_id: order_row.try_get("customer_id")?,
-        status: order_row.try_get("status")?,
-        currency: order_row.try_get("currency")?,
-        subtotal_cents: order_row.try_get("subtotal_cents")?,
-        shipping_cents: order_row.try_get("shipping_cents")?,
-        tax_cents: order_row.try_get("tax_cents")?,
-        total_cents: order_row.try_get("total_cents")?,
-        delivery_address: order_row.try_get("delivery_address")?,
+        id: order_row.id,
+        customer_id: order_row.customer_id,
+        status: order_row.status,
+        currency: order_row.currency,
+        subtotal_cents: order_row.subtotal_cents,
+        shipping_cents: order_row.shipping_cents,
+        tax_cents: order_row.tax_cents,
+        total_cents: order_row.total_cents,
+        delivery_address: order_row.delivery_address,
         items,
     })
 }
@@ -217,18 +220,13 @@ pub(crate) async fn create_order(
         if item.quantity <= 0 {
             return Err(ApiError::bad_request("quantity must be > 0"));
         }
-        let row = sqlx::query(
-            "SELECT id, price_cents FROM products WHERE id = $1 AND status = 'approved'",
-        )
-        .bind(item.product_id)
-        .fetch_optional(&state.pool)
-        .await?;
+        let p = product::Entity::find_by_id(item.product_id)
+            .filter(product::Column::Status.eq("approved"))
+            .one(&state.db)
+            .await?
+            .ok_or_else(|| ApiError::bad_request("product not available"))?;
 
-        let Some(row) = row else {
-            return Err(ApiError::bad_request("product not available"));
-        };
-
-        let unit_price_cents: i64 = row.try_get("price_cents")?;
+        let unit_price_cents = p.price_cents;
         subtotal_cents = subtotal_cents
             .checked_add(unit_price_cents.saturating_mul(item.quantity as i64))
             .ok_or_else(|| ApiError::bad_request("subtotal overflow"))?;
@@ -243,93 +241,83 @@ pub(crate) async fn create_order(
     }
     let total_cents = subtotal_cents + shipping_cents + tax_cents;
 
-    // Authorization check for "create" orders (ownership self).
     authorize_or_forbid(&actor_sub, &orders_collection_obj(), "create", &actor_sub).await?;
 
-    let mut tx = state.pool.begin().await?;
+    let tx = state.db.begin().await?;
 
-    // Idempotency hit?
-    let existing = sqlx::query(
-        "SELECT order_id
-         FROM customer_order_idempotency
-         WHERE customer_id = $1 AND idempotency_key = $2",
-    )
-    .bind(customer_id)
-    .bind(&idemp_key)
-    .fetch_optional(&mut *tx)
-    .await?;
+    let existing = customer_order_idempotency::Entity::find()
+        .filter(customer_order_idempotency::Column::CustomerId.eq(customer_id))
+        .filter(customer_order_idempotency::Column::IdempotencyKey.eq(&idemp_key))
+        .one(&tx)
+        .await?;
 
     if let Some(row) = existing {
-        let order_id: Uuid = row.try_get("order_id")?;
+        let order_id = row.order_id;
         tx.rollback().await.ok();
-        let order = fetch_order_with_items(&state.pool, customer_id, order_id).await?;
+        let order = fetch_order_with_items(&state.db, customer_id, order_id).await?;
         return Ok(Json(order));
     }
 
-    let insert_order = sqlx::query(
-        "INSERT INTO orders (customer_id, status, currency, subtotal_cents, shipping_cents, tax_cents, total_cents, delivery_address)
-         VALUES ($1, 'awaiting_payment', 'NGN', $2, $3, $4, $5, $6)
-         RETURNING id, customer_id, status, currency, subtotal_cents, shipping_cents, tax_cents, total_cents, delivery_address",
-    )
-    .bind(customer_id)
-    .bind(subtotal_cents)
-    .bind(shipping_cents)
-    .bind(tax_cents)
-    .bind(total_cents)
-    .bind(req.delivery_address)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    let order_id: Uuid = insert_order.try_get("id")?;
+    let order_id = Uuid::new_v4();
+    let now = chrono::Utc::now();
+    let order_am = order_tbl::ActiveModel {
+        id: Set(order_id),
+        customer_id: Set(customer_id),
+        status: Set("awaiting_payment".to_string()),
+        currency: Set("NGN".to_string()),
+        subtotal_cents: Set(subtotal_cents),
+        shipping_cents: Set(shipping_cents),
+        tax_cents: Set(tax_cents),
+        total_cents: Set(total_cents),
+        delivery_address: Set(req.delivery_address.clone()),
+        created_at: Set(now),
+        updated_at: Set(now),
+    };
+    order_tbl::Entity::insert(order_am).exec(&tx).await?;
 
     for (product_id, quantity, unit_price_cents) in items_to_insert {
-        sqlx::query(
-            "INSERT INTO order_items (order_id, product_id, unit_price_cents, quantity)
-             VALUES ($1, $2, $3, $4)",
-        )
-        .bind(order_id)
-        .bind(product_id)
-        .bind(unit_price_cents)
-        .bind(quantity)
-        .execute(&mut *tx)
-        .await?;
+        let oi = order_item::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            order_id: Set(order_id),
+            product_id: Set(product_id),
+            unit_price_cents: Set(unit_price_cents),
+            quantity: Set(quantity),
+            created_at: Set(now),
+        };
+        order_item::Entity::insert(oi).exec(&tx).await?;
     }
 
-    // Store the idempotency key mapping.
-    let mapping = sqlx::query(
-        "INSERT INTO customer_order_idempotency (customer_id, idempotency_key, order_id)
-         VALUES ($1, $2, $3)",
-    )
-    .bind(customer_id)
-    .bind(&idemp_key)
-    .bind(order_id)
-    .execute(&mut *tx)
-    .await;
+    let map_am = customer_order_idempotency::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        customer_id: Set(customer_id),
+        idempotency_key: Set(idemp_key.clone()),
+        order_id: Set(order_id),
+        created_at: Set(now),
+    };
 
-    match mapping {
+    match customer_order_idempotency::Entity::insert(map_am)
+        .exec(&tx)
+        .await
+    {
         Ok(_) => {
             tx.commit().await?;
         }
-        Err(sqlx::Error::Database(db_err)) if db_err.code() == Some("23505".into()) => {
-            // Concurrent identical request: rollback our inserts and return the existing order.
+        Err(e) if db_err_is_unique_violation(&e) => {
             tx.rollback().await.ok();
-            let row = sqlx::query(
-                "SELECT order_id FROM customer_order_idempotency
-                 WHERE customer_id = $1 AND idempotency_key = $2",
-            )
-            .bind(customer_id)
-            .bind(&idemp_key)
-            .fetch_one(&state.pool)
-            .await?;
-
-            let existing_order_id: Uuid = row.try_get("order_id")?;
-            let order = fetch_order_with_items(&state.pool, customer_id, existing_order_id).await?;
+            let row = customer_order_idempotency::Entity::find()
+                .filter(customer_order_idempotency::Column::CustomerId.eq(customer_id))
+                .filter(customer_order_idempotency::Column::IdempotencyKey.eq(&idemp_key))
+                .one(&state.db)
+                .await?
+                .ok_or_else(|| ApiError::internal("idempotency row missing after conflict".to_string()))?;
+            let existing_order_id = row.order_id;
+            let order = fetch_order_with_items(&state.db, customer_id, existing_order_id).await?;
             return Ok(Json(order));
         }
-        Err(err) => return Err(ApiError::from(err)),
+        Err(e) => return Err(ApiError::from(e)),
     }
 
-    let order = fetch_order_with_items(&state.pool, customer_id, order_id).await?;
+    let order = fetch_order_with_items(&state.db, customer_id, order_id).await?;
     Ok(Json(order))
 }
 
@@ -352,10 +340,9 @@ pub(crate) async fn get_order(
 ) -> Result<Json<OrderResponse>, ApiError> {
     let (actor_sub, customer_id) = require_customer(&headers, &state).await?;
 
-    // Ownership authorization.
     authorize_or_forbid(&actor_sub, &order_obj(order_id), "read", &actor_sub).await?;
 
-    let order = fetch_order_with_items(&state.pool, customer_id, order_id).await?;
+    let order = fetch_order_with_items(&state.db, customer_id, order_id).await?;
     Ok(Json(order))
 }
 
@@ -380,33 +367,30 @@ fn deterministic_paystack_reference(order_id: Uuid, idempotency_key: &str) -> St
     hasher.update(idempotency_key);
     let digest = hasher.finalize();
 
-    // Paystack references are opaque strings; keep them reasonably short.
     let suffix = hex::encode(digest);
     format!("ord{}_{}", order_id, &suffix[..24])
 }
 
 async fn wait_for_payment_attempt(
-    pool: &PgPool,
+    db: &DatabaseConnection,
     payment_attempt_id: Uuid,
 ) -> Result<PaystackInitializeResponse, ApiError> {
     use tokio::time::{Duration, sleep};
 
     for _ in 0..20 {
-        let row = sqlx::query(
-            "SELECT status, raw_payload, paystack_reference, order_id
-             FROM payment_attempts WHERE id = $1",
-        )
-        .bind(payment_attempt_id)
-        .fetch_one(pool)
-        .await?;
+        let row = payment_attempt::Entity::find_by_id(payment_attempt_id)
+            .one(db)
+            .await?
+            .ok_or_else(|| ApiError::internal("payment attempt missing".to_string()))?;
 
-        let status: String = row.try_get("status")?;
-        let paystack_reference: String = row.try_get("paystack_reference")?;
-        let order_id: Uuid = row.try_get("order_id")?;
+        let status = row.status;
+        let paystack_reference = row.paystack_reference;
+        let order_id = row.order_id;
 
         if status == "initialized" {
-            let raw_payload: Option<serde_json::Value> = row.try_get("raw_payload")?;
-            let Some(raw_payload) = raw_payload else {
+            let Some(raw_payload): Option<serde_json::Value> =
+                row.raw_payload
+            else {
                 return Err(ApiError::internal(
                     "missing raw_payload for initialized attempt".to_string(),
                 ));
@@ -470,90 +454,83 @@ pub(crate) async fn initialize_paystack(
 
     authorize_or_forbid(&actor_sub, &order_obj(order_id), "pay", &actor_sub).await?;
 
-    let order_row = sqlx::query(
-        "SELECT o.total_cents, o.currency, c.email
-             FROM orders o
-             JOIN customers c ON c.id = o.customer_id
-             WHERE o.id = $1 AND o.customer_id = $2",
-    )
-    .bind(order_id)
-    .bind(customer_id)
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or_else(|| ApiError::not_found("order not found"))?;
+    let order_row = order_tbl::Entity::find_by_id(order_id)
+        .filter(order_tbl::Column::CustomerId.eq(customer_id))
+        .one(&state.db)
+        .await?
+        .ok_or_else(|| ApiError::not_found("order not found"))?;
 
-    let order_total_cents: i64 = order_row.try_get("total_cents")?;
-    let currency: String = order_row.try_get("currency")?;
-    let customer_email: String = order_row.try_get("email")?;
+    let order_total_cents = order_row.total_cents;
+    let currency = order_row.currency.clone();
+
+    let cust = customer::Entity::find_by_id(order_row.customer_id)
+        .one(&state.db)
+        .await?
+        .ok_or_else(|| ApiError::internal("customer missing".to_string()))?;
+    let customer_email = cust.email;
 
     let reference = deterministic_paystack_reference(order_id, &idemp_key);
 
-    // 1) Reserve or reuse the payment attempt for this idempotency key.
     let (payment_attempt_id, created_new_attempt) = {
-        let mut tx = state.pool.begin().await?;
+        let tx = state.db.begin().await?;
 
-        if let Some(row) = sqlx::query(
-            "SELECT payment_attempt_id
-             FROM order_payment_idempotency
-             WHERE order_id = $1 AND idempotency_key = $2",
-        )
-        .bind(order_id)
-        .bind(&idemp_key)
-        .fetch_optional(&mut *tx)
-        .await?
+        if let Some(row) = order_payment_idempotency::Entity::find()
+            .filter(order_payment_idempotency::Column::OrderId.eq(order_id))
+            .filter(order_payment_idempotency::Column::IdempotencyKey.eq(&idemp_key))
+            .one(&tx)
+            .await?
         {
             tx.rollback().await.ok();
-            (row.try_get::<Uuid, _>("payment_attempt_id")?, false)
+            (row.payment_attempt_id, false)
         } else {
-            // Create a pending payment attempt so other identical requests can wait.
-            let payment_row = sqlx::query(
-                "INSERT INTO payment_attempts
-                 (order_id, provider, paystack_reference, amount_cents, currency, status, raw_payload)
-                 VALUES ($1, 'paystack', $2, $3, $4, 'pending', NULL)
-                 RETURNING id",
-            )
-            .bind(order_id)
-            .bind(&reference)
-            .bind(order_total_cents)
-            .bind(&currency)
-            .fetch_one(&mut *tx)
-            .await?;
+            let payment_attempt_id = Uuid::new_v4();
+            let now = chrono::Utc::now();
+            let pa = payment_attempt::ActiveModel {
+                id: Set(payment_attempt_id),
+                order_id: Set(order_id),
+                provider: Set("paystack".to_string()),
+                paystack_reference: Set(reference.clone()),
+                amount_cents: Set(order_total_cents),
+                currency: Set(currency.clone()),
+                status: Set("pending".to_string()),
+                raw_payload: Set(None),
+                paid_at: Set(None),
+                created_at: Set(now),
+                updated_at: Set(now),
+            };
+            payment_attempt::Entity::insert(pa).exec(&tx).await?;
 
-            let payment_attempt_id: Uuid = payment_row.try_get("id")?;
+            let map_am = order_payment_idempotency::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                order_id: Set(order_id),
+                idempotency_key: Set(idemp_key.clone()),
+                payment_attempt_id: Set(payment_attempt_id),
+                created_at: Set(now),
+            };
 
-            let mapping = sqlx::query(
-                "INSERT INTO order_payment_idempotency
-                 (order_id, idempotency_key, payment_attempt_id)
-                 VALUES ($1, $2, $3)",
-            )
-            .bind(order_id)
-            .bind(&idemp_key)
-            .bind(payment_attempt_id)
-            .execute(&mut *tx)
-            .await;
-
-            match mapping {
+            match order_payment_idempotency::Entity::insert(map_am)
+                .exec(&tx)
+                .await
+            {
                 Ok(_) => {
                     tx.commit().await?;
                     (payment_attempt_id, true)
                 }
-                Err(sqlx::Error::Database(db_err)) if db_err.code() == Some("23505".into()) => {
+                Err(e) if db_err_is_unique_violation(&e) => {
                     tx.rollback().await.ok();
-                    // Another concurrent identical request inserted the mapping.
-                    let row = sqlx::query(
-                        "SELECT payment_attempt_id
-                         FROM order_payment_idempotency
-                         WHERE order_id = $1 AND idempotency_key = $2",
-                    )
-                    .bind(order_id)
-                    .bind(&idemp_key)
-                    .fetch_one(&state.pool)
-                    .await?;
-                    (row.try_get("payment_attempt_id")?, false)
+                    let row = order_payment_idempotency::Entity::find()
+                        .filter(order_payment_idempotency::Column::OrderId.eq(order_id))
+                        .filter(order_payment_idempotency::Column::IdempotencyKey.eq(&idemp_key))
+                        .one(&state.db)
+                        .await?
+                        .ok_or_else(|| {
+                            ApiError::internal("order_payment idempotency missing".to_string())
+                        })?;
+                    (row.payment_attempt_id, false)
                 }
-                Err(err) => {
+                Err(e) => {
                     tx.rollback().await.ok();
-                    return Err(ApiError::from(err));
+                    return Err(ApiError::from(e));
                 }
             }
         }
@@ -561,11 +538,10 @@ pub(crate) async fn initialize_paystack(
 
     if !created_new_attempt {
         return Ok(Json(
-            wait_for_payment_attempt(&state.pool, payment_attempt_id).await?,
+            wait_for_payment_attempt(&state.db, payment_attempt_id).await?,
         ));
     }
 
-    // 2) Initialize the payment with Paystack.
     let paystack_secret = std::env::var("PAYSTACK_SECRET_KEY")
         .map_err(|_| ApiError::internal("PAYSTACK_SECRET_KEY missing".to_string()))?;
     let callback_url = std::env::var("PAYSTACK_CALLBACK_URL")
@@ -600,15 +576,15 @@ pub(crate) async fn initialize_paystack(
 
     if !res.status {
         let message = res.message.clone();
-        sqlx::query(
-            "UPDATE payment_attempts
-             SET status = 'failed', updated_at = now(), raw_payload = $1
-             WHERE id = $2",
-        )
-        .bind(serde_json::json!({ "error": message }))
-        .bind(payment_attempt_id)
-        .execute(&state.pool)
-        .await?;
+        let mut pa: payment_attempt::ActiveModel = payment_attempt::Entity::find_by_id(payment_attempt_id)
+            .one(&state.db)
+            .await?
+            .ok_or_else(|| ApiError::internal("payment attempt missing".to_string()))?
+            .into_active_model();
+        pa.status = Set("failed".to_string());
+        pa.raw_payload = Set(Some(serde_json::json!({ "error": message })));
+        pa.updated_at = Set(chrono::Utc::now());
+        pa.update(&state.db).await?;
 
         return Err(ApiError::bad_request(message));
     }
@@ -623,26 +599,24 @@ pub(crate) async fn initialize_paystack(
         "reference": reference,
     });
 
-    // 3) Persist the initialized payment attempt + update order status.
-    sqlx::query(
-        "UPDATE payment_attempts
-         SET status = 'initialized', updated_at = now(), raw_payload = $1
-         WHERE id = $2",
-    )
-    .bind(&raw_payload)
-    .bind(payment_attempt_id)
-    .execute(&state.pool)
-    .await?;
+    let mut pa: payment_attempt::ActiveModel = payment_attempt::Entity::find_by_id(payment_attempt_id)
+        .one(&state.db)
+        .await?
+        .ok_or_else(|| ApiError::internal("payment attempt missing".to_string()))?
+        .into_active_model();
+    pa.status = Set("initialized".to_string());
+    pa.raw_payload = Set(Some(raw_payload));
+    pa.updated_at = Set(chrono::Utc::now());
+    pa.update(&state.db).await?;
 
-    sqlx::query(
-        "UPDATE orders
-         SET status = 'payment_initialized', updated_at = now()
-         WHERE id = $1 AND customer_id = $2",
-    )
-    .bind(order_id)
-    .bind(customer_id)
-    .execute(&state.pool)
-    .await?;
+    let mut ord: order_tbl::ActiveModel = order_tbl::Entity::find_by_id(order_id)
+        .one(&state.db)
+        .await?
+        .ok_or_else(|| ApiError::not_found("order not found"))?
+        .into_active_model();
+    ord.status = Set("payment_initialized".to_string());
+    ord.updated_at = Set(chrono::Utc::now());
+    ord.update(&state.db).await?;
 
     Ok(Json(PaystackInitializeResponse {
         order_id,
@@ -656,14 +630,17 @@ pub(crate) async fn initialize_paystack(
 mod tests {
     use super::*;
     use axum::http::header::HeaderValue;
+    use crate::entity::seller;
+    use crate::migration::Migrator;
+    use sea_orm::{PaginatorTrait, Set, SqlxPostgresConnector};
+    use sea_orm_migration::MigratorTrait;
     use sqlx::postgres::PgPoolOptions;
     use std::sync::OnceLock;
     use tokio::sync::Semaphore;
 
-    // Prevent concurrent DB tests from stepping on each other in the same database.
     static DB_TEST_SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
 
-    async fn test_pool() -> Option<sqlx::PgPool> {
+    async fn test_db() -> Option<DatabaseConnection> {
         let database_url = std::env::var("DATABASE_URL").ok()?;
         let pool = PgPoolOptions::new()
             .max_connections(5)
@@ -671,17 +648,18 @@ mod tests {
             .await
             .ok()?;
 
-        sqlx::migrate!("./migrations").run(&pool).await.ok()?;
-        Some(pool)
+        let db = SqlxPostgresConnector::from_sqlx_postgres_pool(pool);
+        Migrator::up(&db, None).await.ok()?;
+        Some(db)
     }
 
     #[tokio::test]
     async fn create_order_is_idempotent_for_same_key() {
         let sem = DB_TEST_SEMAPHORE.get_or_init(|| Semaphore::new(1));
         let _permit = sem.acquire().await.expect("acquire semaphore permit");
-        let pool = match test_pool().await {
-            Some(p) => p,
-            None => return, // Skip when DATABASE_URL is not set.
+        let db = match test_db().await {
+            Some(d) => d,
+            None => return,
         };
 
         let jwt_secret = "test_jwt_secret";
@@ -690,41 +668,49 @@ mod tests {
         let seller_id = Uuid::new_v4();
         let product_id = Uuid::new_v4();
 
-        sqlx::query(
-            "INSERT INTO sellers (id, email, password_hash) VALUES ($1, $2, $3)",
-        )
-        .bind(seller_id)
-        .bind(format!("seller+{}@example.com", Uuid::new_v4()))
-        .bind("dummy_hash")
-        .execute(&pool)
+        let now = chrono::Utc::now();
+        seller::Entity::insert(seller::ActiveModel {
+            id: Set(seller_id),
+            email: Set(format!("seller+{}@example.com", Uuid::new_v4())),
+            password_hash: Set("dummy_hash".into()),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+        })
+        .exec(&db)
         .await
         .expect("insert seller");
 
-        sqlx::query(
-            "INSERT INTO products (id, seller_id, title, description, price_cents, currency, status)
-             VALUES ($1, $2, $3, $4, $5, 'NGN', 'approved')",
-        )
-        .bind(product_id)
-        .bind(seller_id)
-        .bind("Chair")
-        .bind("Wooden chair")
-        .bind(2_500_i64)
-        .execute(&pool)
+        product::Entity::insert(product::ActiveModel {
+            id: Set(product_id),
+            seller_id: Set(seller_id),
+            title: Set("Chair".into()),
+            description: Set("Wooden chair".into()),
+            price_cents: Set(2_500),
+            currency: Set("NGN".into()),
+            dimensions: Set(None),
+            status: Set("approved".into()),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+        })
+        .exec(&db)
         .await
         .expect("insert product");
 
-        sqlx::query(
-            "INSERT INTO customers (id, email, password_hash) VALUES ($1, $2, $3)",
-        )
-        .bind(customer_id)
-        .bind(format!("customer+{}@example.com", Uuid::new_v4()))
-        .bind("dummy_hash")
-        .execute(&pool)
+        customer::Entity::insert(customer::ActiveModel {
+            id: Set(customer_id),
+            email: Set(format!("customer+{}@example.com", Uuid::new_v4())),
+            password_hash: Set("dummy_hash".into()),
+            phone: Set(None),
+            address: Set(None),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+        })
+        .exec(&db)
         .await
         .expect("insert customer");
 
         let state = AppState {
-            pool: pool.clone(),
+            db: db.clone(),
             jwt_secret: jwt_secret.to_string(),
             jwt_issuer: jwt_issuer.to_string(),
             access_token_ttl_secs: 3600,
@@ -773,25 +759,18 @@ mod tests {
         .await
         .expect("create order");
 
-        let order_2 = create_order(
-            headers,
-            Extension(state),
-            Json(req),
-        )
-        .await
-        .expect("create order second time");
+        let order_2 = create_order(headers, Extension(state), Json(req))
+            .await
+            .expect("create order second time");
 
         assert_eq!(order_1.0.id, order_2.0.id, "idempotency should reuse order");
 
-        let mapping_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM customer_order_idempotency
-             WHERE customer_id = $1 AND idempotency_key = $2",
-        )
-        .bind(customer_id)
-        .bind(&idempotency_key)
-        .fetch_one(&pool)
-        .await
-        .expect("fetch mapping_count");
+        let mapping_count = customer_order_idempotency::Entity::find()
+            .filter(customer_order_idempotency::Column::CustomerId.eq(customer_id))
+            .filter(customer_order_idempotency::Column::IdempotencyKey.eq(&idempotency_key))
+            .count(&db)
+            .await
+            .expect("count mapping");
 
         assert_eq!(mapping_count, 1, "idempotency mapping should exist once");
     }
@@ -800,8 +779,8 @@ mod tests {
     async fn initialize_paystack_is_idempotent_for_same_key_without_network() {
         let sem = DB_TEST_SEMAPHORE.get_or_init(|| Semaphore::new(1));
         let _permit = sem.acquire().await.expect("acquire semaphore permit");
-        let pool = match test_pool().await {
-            Some(p) => p,
+        let db = match test_db().await {
+            Some(d) => d,
             None => return,
         };
 
@@ -812,55 +791,67 @@ mod tests {
         let product_id = Uuid::new_v4();
         let order_id = Uuid::new_v4();
 
-        sqlx::query(
-            "INSERT INTO sellers (id, email, password_hash) VALUES ($1, $2, $3)",
-        )
-        .bind(seller_id)
-        .bind(format!("seller+{}@example.com", Uuid::new_v4()))
-        .bind("dummy_hash")
-        .execute(&pool)
+        let now = chrono::Utc::now();
+        seller::Entity::insert(seller::ActiveModel {
+            id: Set(seller_id),
+            email: Set(format!("seller+{}@example.com", Uuid::new_v4())),
+            password_hash: Set("dummy_hash".into()),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+        })
+        .exec(&db)
         .await
         .expect("insert seller");
 
-        sqlx::query(
-            "INSERT INTO products (id, seller_id, title, description, price_cents, currency, status)
-             VALUES ($1, $2, $3, $4, $5, 'NGN', 'approved')",
-        )
-        .bind(product_id)
-        .bind(seller_id)
-        .bind("Table")
-        .bind("Oak table")
-        .bind(3_000_i64)
-        .execute(&pool)
+        product::Entity::insert(product::ActiveModel {
+            id: Set(product_id),
+            seller_id: Set(seller_id),
+            title: Set("Table".into()),
+            description: Set("Oak table".into()),
+            price_cents: Set(3_000),
+            currency: Set("NGN".into()),
+            dimensions: Set(None),
+            status: Set("approved".into()),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+        })
+        .exec(&db)
         .await
         .expect("insert product");
 
-        sqlx::query(
-            "INSERT INTO customers (id, email, password_hash) VALUES ($1, $2, $3)",
-        )
-        .bind(customer_id)
-        .bind(format!("customer+{}@example.com", Uuid::new_v4()))
-        .bind("dummy_hash")
-        .execute(&pool)
+        customer::Entity::insert(customer::ActiveModel {
+            id: Set(customer_id),
+            email: Set(format!("customer+{}@example.com", Uuid::new_v4())),
+            password_hash: Set("dummy_hash".into()),
+            phone: Set(None),
+            address: Set(None),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+        })
+        .exec(&db)
         .await
         .expect("insert customer");
 
-        // Seed an order directly so we can pre-create the payment attempt without
-        // calling the external Paystack API.
         let amount_cents: i64 = 3_000;
-        sqlx::query(
-            "INSERT INTO orders (id, customer_id, status, currency, subtotal_cents, shipping_cents, tax_cents, total_cents, delivery_address)
-             VALUES ($1, $2, 'awaiting_payment', 'NGN', $3, 0, 0, $3, '{}'::jsonb)",
-        )
-        .bind(order_id)
-        .bind(customer_id)
-        .bind(amount_cents)
-        .execute(&pool)
+        order_tbl::Entity::insert(order_tbl::ActiveModel {
+            id: Set(order_id),
+            customer_id: Set(customer_id),
+            status: Set("awaiting_payment".into()),
+            currency: Set("NGN".into()),
+            subtotal_cents: Set(amount_cents),
+            shipping_cents: Set(0),
+            tax_cents: Set(0),
+            total_cents: Set(amount_cents),
+            delivery_address: Set(serde_json::json!({}).into()),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+        })
+        .exec(&db)
         .await
         .expect("insert order");
 
         let state = AppState {
-            pool: pool.clone(),
+            db: db.clone(),
             jwt_secret: jwt_secret.to_string(),
             jwt_issuer: jwt_issuer.to_string(),
             access_token_ttl_secs: 3600,
@@ -880,31 +871,38 @@ mod tests {
 
         let payment_attempt_id = Uuid::new_v4();
 
-        sqlx::query(
-            "INSERT INTO payment_attempts (id, order_id, provider, paystack_reference, amount_cents, currency, status, raw_payload)
-             VALUES ($1, $2, 'paystack', $3, $4, 'NGN', 'initialized', $5)",
-        )
-        .bind(payment_attempt_id)
-        .bind(order_id)
-        .bind(&paystack_reference)
-        .bind(amount_cents)
-        .bind(serde_json::json!({
-            "authorization_url": "https://example.com/auth",
-            "access_code": "ACME",
-            "reference": paystack_reference.clone()
-        }))
-        .execute(&pool)
+        payment_attempt::Entity::insert(payment_attempt::ActiveModel {
+            id: Set(payment_attempt_id),
+            order_id: Set(order_id),
+            provider: Set("paystack".into()),
+            paystack_reference: Set(paystack_reference.clone()),
+            amount_cents: Set(amount_cents),
+            currency: Set("NGN".into()),
+            status: Set("initialized".into()),
+            raw_payload: Set(Some(
+                serde_json::json!({
+                    "authorization_url": "https://example.com/auth",
+                    "access_code": "ACME",
+                    "reference": paystack_reference.clone()
+                })
+                .into(),
+            )),
+            paid_at: Set(None),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+        })
+        .exec(&db)
         .await
         .expect("insert payment_attempt");
 
-        sqlx::query(
-            "INSERT INTO order_payment_idempotency (order_id, idempotency_key, payment_attempt_id)
-             VALUES ($1, $2, $3)",
-        )
-        .bind(order_id)
-        .bind(&idempotency_key)
-        .bind(payment_attempt_id)
-        .execute(&pool)
+        order_payment_idempotency::Entity::insert(order_payment_idempotency::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            order_id: Set(order_id),
+            idempotency_key: Set(idempotency_key.clone()),
+            payment_attempt_id: Set(payment_attempt_id),
+            created_at: Set(now.into()),
+        })
+        .exec(&db)
         .await
         .expect("insert order_payment_idempotency");
 
@@ -942,13 +940,11 @@ mod tests {
             init_2.0.authorization_url,
         );
 
-        let attempt_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM payment_attempts WHERE id = $1",
-        )
-        .bind(payment_attempt_id)
-        .fetch_one(&pool)
-        .await
-        .expect("fetch payment_attempt count");
+        let attempt_count = payment_attempt::Entity::find()
+            .filter(payment_attempt::Column::Id.eq(payment_attempt_id))
+            .count(&db)
+            .await
+            .expect("count payment_attempt");
 
         assert_eq!(attempt_count, 1, "idempotency should not create duplicates");
     }

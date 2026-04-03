@@ -6,12 +6,15 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::Row;
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, Set,
+};
 use uuid::Uuid;
 
 use crate::{
     auth::jwt,
     authz::casbin as casbin_authz,
+    entity::product,
     http::error::ApiError,
     state::AppState,
 };
@@ -166,6 +169,19 @@ async fn ensure_authorized(
     Ok(())
 }
 
+fn model_to_response(m: product::Model) -> ProductResponse {
+    ProductResponse {
+        id: m.id,
+        seller_id: m.seller_id,
+        title: m.title,
+        description: m.description,
+        price_cents: m.price_cents,
+        currency: m.currency,
+        dimensions: m.dimensions,
+        status: m.status,
+    }
+}
+
 #[utoipa::path(
     post,
     path = "/v1/sellers/me/products",
@@ -207,31 +223,26 @@ pub(crate) async fn create_product(
         return Err(ApiError::bad_request("price_cents must be >= 0"));
     }
 
-    let insert = sqlx::query(
-        "INSERT INTO products (seller_id, title, description, price_cents, currency, dimensions, status)
-         VALUES ($1, $2, $3, $4, 'NGN', $5, 'pending')
-         RETURNING id, seller_id, title, description, price_cents, currency, dimensions, status",
-    )
-    .bind(seller_id)
-    .bind(&req.title)
-    .bind(&req.description)
-    .bind(req.price_cents)
-    .bind(req.dimensions)
-    .fetch_one(&state.pool)
-    .await?;
-
-    let product = ProductResponse {
-        id: insert.try_get("id")?,
-        seller_id: insert.try_get("seller_id")?,
-        title: insert.try_get("title")?,
-        description: insert.try_get("description")?,
-        price_cents: insert.try_get("price_cents")?,
-        currency: insert.try_get("currency")?,
-        dimensions: insert.try_get("dimensions")?,
-        status: insert.try_get("status")?,
+    let id = Uuid::new_v4();
+    let now = chrono::Utc::now();
+    let active = product::ActiveModel {
+        id: Set(id),
+        seller_id: Set(seller_id),
+        title: Set(req.title),
+        description: Set(req.description),
+        price_cents: Set(req.price_cents),
+        currency: Set("NGN".to_string()),
+        dimensions: Set(req.dimensions),
+        status: Set("pending".to_string()),
+        created_at: Set(now),
+        updated_at: Set(now),
     };
 
-    Ok(Json(product))
+    let inserted = product::Entity::insert(active)
+        .exec_with_returning(&state.db)
+        .await?;
+
+    Ok(Json(model_to_response(inserted)))
 }
 
 #[utoipa::path(
@@ -261,30 +272,13 @@ pub(crate) async fn list_my_products(
     )
     .await?;
 
-    let rows = sqlx::query(
-        "SELECT id, seller_id, title, description, price_cents, currency, dimensions, status
-         FROM products WHERE seller_id = $1
-         ORDER BY created_at DESC",
-    )
-    .bind(seller_id)
-    .fetch_all(&state.pool)
-    .await?;
+    let rows = product::Entity::find()
+        .filter(product::Column::SellerId.eq(seller_id))
+        .order_by_desc(product::Column::CreatedAt)
+        .all(&state.db)
+        .await?;
 
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        out.push(ProductResponse {
-            id: row.try_get("id")?,
-            seller_id: row.try_get("seller_id")?,
-            title: row.try_get("title")?,
-            description: row.try_get("description")?,
-            price_cents: row.try_get("price_cents")?,
-            currency: row.try_get("currency")?,
-            dimensions: row.try_get("dimensions")?,
-            status: row.try_get("status")?,
-        });
-    }
-
-    Ok(Json(out))
+    Ok(Json(rows.into_iter().map(model_to_response).collect()))
 }
 
 #[utoipa::path(
@@ -319,40 +313,30 @@ pub(crate) async fn update_product(
     )
     .await?;
 
-    let update = sqlx::query(
-        "UPDATE products
-         SET
-           title = COALESCE($2, title),
-           description = COALESCE($3, description),
-           price_cents = COALESCE($4, price_cents),
-           dimensions = COALESCE($5, dimensions),
-           updated_at = now()
-         WHERE id = $1 AND seller_id = $6
-         RETURNING id, seller_id, title, description, price_cents, currency, dimensions, status",
-    )
-    .bind(product_id)
-    .bind(req.title)
-    .bind(req.description)
-    .bind(req.price_cents)
-    .bind(req.dimensions)
-    .bind(seller_id)
-    .fetch_optional(&state.pool)
-    .await?;
+    let existing = product::Entity::find()
+        .filter(product::Column::Id.eq(product_id))
+        .filter(product::Column::SellerId.eq(seller_id))
+        .one(&state.db)
+        .await?
+        .ok_or_else(|| ApiError::not_found("product not found"))?;
 
-    let Some(row) = update else {
-        return Err(ApiError::not_found("product not found"));
-    };
+    let mut active: product::ActiveModel = existing.into_active_model();
+    if let Some(t) = req.title {
+        active.title = Set(t);
+    }
+    if let Some(d) = req.description {
+        active.description = Set(d);
+    }
+    if let Some(p) = req.price_cents {
+        active.price_cents = Set(p);
+    }
+    if let Some(d) = req.dimensions {
+        active.dimensions = Set(Some(d));
+    }
+    active.updated_at = Set(chrono::Utc::now());
 
-    Ok(Json(ProductResponse {
-        id: row.try_get("id")?,
-        seller_id: row.try_get("seller_id")?,
-        title: row.try_get("title")?,
-        description: row.try_get("description")?,
-        price_cents: row.try_get("price_cents")?,
-        currency: row.try_get("currency")?,
-        dimensions: row.try_get("dimensions")?,
-        status: row.try_get("status")?,
-    }))
+    let updated = active.update(&state.db).await?;
+    Ok(Json(model_to_response(updated)))
 }
 
 #[utoipa::path(
@@ -384,15 +368,13 @@ pub(crate) async fn delete_product(
     )
     .await?;
 
-    let deleted = sqlx::query(
-        "DELETE FROM products WHERE id = $1 AND seller_id = $2",
-    )
-    .bind(product_id)
-    .bind(seller_id)
-    .execute(&state.pool)
-    .await?;
+    let deleted = product::Entity::delete_many()
+        .filter(product::Column::Id.eq(product_id))
+        .filter(product::Column::SellerId.eq(seller_id))
+        .exec(&state.db)
+        .await?;
 
-    if deleted.rows_affected() == 0 {
+    if deleted.rows_affected == 0 {
         return Err(ApiError::not_found("product not found"));
     }
 
@@ -426,30 +408,13 @@ pub(crate) async fn list_pending_products(
     )
     .await?;
 
-    let rows = sqlx::query(
-        "SELECT id, seller_id, title, description, price_cents, currency, dimensions, status
-         FROM products
-         WHERE status = 'pending'
-         ORDER BY created_at DESC",
-    )
-    .fetch_all(&state.pool)
-    .await?;
+    let rows = product::Entity::find()
+        .filter(product::Column::Status.eq("pending"))
+        .order_by_desc(product::Column::CreatedAt)
+        .all(&state.db)
+        .await?;
 
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        out.push(ProductResponse {
-            id: row.try_get("id")?,
-            seller_id: row.try_get("seller_id")?,
-            title: row.try_get("title")?,
-            description: row.try_get("description")?,
-            price_cents: row.try_get("price_cents")?,
-            currency: row.try_get("currency")?,
-            dimensions: row.try_get("dimensions")?,
-            status: row.try_get("status")?,
-        });
-    }
-
-    Ok(Json(out))
+    Ok(Json(rows.into_iter().map(model_to_response).collect()))
 }
 
 #[utoipa::path(
@@ -481,30 +446,17 @@ pub(crate) async fn approve_product(
     )
     .await?;
 
-    let updated = sqlx::query(
-        "UPDATE products
-         SET status = 'approved', updated_at = now()
-         WHERE id = $1
-         RETURNING id, seller_id, title, description, price_cents, currency, dimensions, status",
-    )
-    .bind(product_id)
-    .fetch_optional(&state.pool)
-    .await?;
+    let existing = product::Entity::find_by_id(product_id)
+        .one(&state.db)
+        .await?
+        .ok_or_else(|| ApiError::not_found("product not found"))?;
 
-    let Some(row) = updated else {
-        return Err(ApiError::not_found("product not found"));
-    };
+    let mut active = existing.into_active_model();
+    active.status = Set("approved".to_string());
+    active.updated_at = Set(chrono::Utc::now());
+    let updated = active.update(&state.db).await?;
 
-    Ok(Json(ProductResponse {
-        id: row.try_get("id")?,
-        seller_id: row.try_get("seller_id")?,
-        title: row.try_get("title")?,
-        description: row.try_get("description")?,
-        price_cents: row.try_get("price_cents")?,
-        currency: row.try_get("currency")?,
-        dimensions: row.try_get("dimensions")?,
-        status: row.try_get("status")?,
-    }))
+    Ok(Json(model_to_response(updated)))
 }
 
 #[utoipa::path(
@@ -536,29 +488,15 @@ pub(crate) async fn reject_product(
     )
     .await?;
 
-    let updated = sqlx::query(
-        "UPDATE products
-         SET status = 'rejected', updated_at = now()
-         WHERE id = $1
-         RETURNING id, seller_id, title, description, price_cents, currency, dimensions, status",
-    )
-    .bind(product_id)
-    .fetch_optional(&state.pool)
-    .await?;
+    let existing = product::Entity::find_by_id(product_id)
+        .one(&state.db)
+        .await?
+        .ok_or_else(|| ApiError::not_found("product not found"))?;
 
-    let Some(row) = updated else {
-        return Err(ApiError::not_found("product not found"));
-    };
+    let mut active = existing.into_active_model();
+    active.status = Set("rejected".to_string());
+    active.updated_at = Set(chrono::Utc::now());
+    let updated = active.update(&state.db).await?;
 
-    Ok(Json(ProductResponse {
-        id: row.try_get("id")?,
-        seller_id: row.try_get("seller_id")?,
-        title: row.try_get("title")?,
-        description: row.try_get("description")?,
-        price_cents: row.try_get("price_cents")?,
-        currency: row.try_get("currency")?,
-        dimensions: row.try_get("dimensions")?,
-        status: row.try_get("status")?,
-    }))
+    Ok(Json(model_to_response(updated)))
 }
-

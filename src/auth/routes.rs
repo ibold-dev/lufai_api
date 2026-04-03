@@ -4,11 +4,13 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 use uuid::Uuid;
 
 use crate::{
     auth::{jwt, password},
+    db::db_err_is_unique_violation,
+    entity::{admin, customer, seller},
     http::error::ApiError,
     state::AppState,
 };
@@ -65,30 +67,27 @@ pub(crate) async fn customer_register(
     let password_hash = password::hash_password(&req.password)?;
     let email = req.email.trim();
 
-    let insert = sqlx::query(
-        "INSERT INTO customers (email, password_hash) \
-         VALUES ($1, $2) RETURNING id",
-    )
-    .bind(email)
-    .bind(&password_hash)
-    .fetch_one(&state.pool)
-    .await;
+    let customer_id = Uuid::new_v4();
+    let now = chrono::Utc::now();
+    let active = customer::ActiveModel {
+        id: Set(customer_id),
+        email: Set(email.to_string()),
+        password_hash: Set(password_hash),
+        phone: Set(None),
+        address: Set(None),
+        created_at: Set(now),
+        updated_at: Set(now),
+    };
 
-    let customer_id = match insert {
-        Ok(row) => row
-            .try_get::<Uuid, _>("id")
-            .map_err(|e| ApiError::internal(format!("bad insert row: {e}")))?,
-        Err(err) => {
-            let msg = format!("failed to create customer: {err}");
-            // Postgres unique violation: 23505
-            if let sqlx::Error::Database(db_err) = &err
-                && db_err.code() == Some("23505".into())
-            {
+    match customer::Entity::insert(active).exec(&state.db).await {
+        Ok(_) => {}
+        Err(e) => {
+            if db_err_is_unique_violation(&e) {
                 return Err(ApiError::conflict("email already in use"));
             }
-            return Err(ApiError::internal(msg));
+            return Err(ApiError::from(e));
         }
-    };
+    }
 
     let subject = format!("customer:{customer_id}");
     let access_token = jwt::create_access_token(
@@ -123,18 +122,17 @@ pub(crate) async fn customer_login(
     validate_email(&req.email)?;
     let email = req.email.trim();
 
-    let row = sqlx::query("SELECT id, password_hash FROM customers WHERE email = $1")
-        .bind(email)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(|e| ApiError::internal(format!("db error: {e}")))?;
+    let row = customer::Entity::find()
+        .filter(customer::Column::Email.eq(email))
+        .one(&state.db)
+        .await?;
 
     let Some(row) = row else {
         return Err(ApiError::unauthorized());
     };
 
-    let customer_id: Uuid = row.try_get("id")?;
-    let password_hash: String = row.try_get("password_hash")?;
+    let customer_id = row.id;
+    let password_hash = row.password_hash;
 
     let ok = password::verify_password(&password_hash, &req.password)?;
     if !ok {
@@ -174,18 +172,17 @@ pub(crate) async fn seller_login(
     validate_email(&req.email)?;
     let email = req.email.trim();
 
-    let row = sqlx::query("SELECT id, password_hash FROM sellers WHERE email = $1")
-        .bind(email)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(|e| ApiError::internal(format!("db error: {e}")))?;
+    let row = seller::Entity::find()
+        .filter(seller::Column::Email.eq(email))
+        .one(&state.db)
+        .await?;
 
     let Some(row) = row else {
         return Err(ApiError::unauthorized());
     };
 
-    let seller_id: Uuid = row.try_get("id")?;
-    let password_hash: String = row.try_get("password_hash")?;
+    let seller_id = row.id;
+    let password_hash = row.password_hash;
 
     let ok = password::verify_password(&password_hash, &req.password)?;
     if !ok {
@@ -225,18 +222,17 @@ pub(crate) async fn admin_login(
     validate_email(&req.email)?;
     let email = req.email.trim();
 
-    let row = sqlx::query("SELECT id, password_hash FROM admins WHERE email = $1")
-        .bind(email)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(|e| ApiError::internal(format!("db error: {e}")))?;
+    let row = admin::Entity::find()
+        .filter(admin::Column::Email.eq(email))
+        .one(&state.db)
+        .await?;
 
     let Some(row) = row else {
         return Err(ApiError::unauthorized());
     };
 
-    let admin_id: Uuid = row.try_get("id")?;
-    let password_hash: String = row.try_get("password_hash")?;
+    let admin_id = row.id;
+    let password_hash = row.password_hash;
 
     let ok = password::verify_password(&password_hash, &req.password)?;
     if !ok {

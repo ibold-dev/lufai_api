@@ -101,8 +101,8 @@ impl IntoResponse for ApiError {
     }
 }
 
-impl From<sqlx::Error> for ApiError {
-    fn from(err: sqlx::Error) -> Self {
+impl From<sea_orm::DbErr> for ApiError {
+    fn from(err: sea_orm::DbErr) -> Self {
         ApiError::internal(format!("db error: {err}"))
     }
 }

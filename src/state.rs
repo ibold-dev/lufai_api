@@ -1,16 +1,16 @@
 use crate::http::error::ApiError;
-use sqlx::PgPool;
+use sea_orm::DatabaseConnection;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub pool: PgPool,
+    pub db: DatabaseConnection,
     pub jwt_secret: String,
     pub jwt_issuer: String,
     pub access_token_ttl_secs: i64,
 }
 
 impl AppState {
-    pub fn from_pool(pool: PgPool) -> Result<Self, ApiError> {
+    pub fn from_db(db: DatabaseConnection) -> Result<Self, ApiError> {
         let jwt_secret = std::env::var("JWT_SECRET")
             .map_err(|_| ApiError::internal("JWT_SECRET is not set".to_string()))?;
 
@@ -22,7 +22,7 @@ impl AppState {
             .unwrap_or(86_400);
 
         Ok(Self {
-            pool,
+            db,
             jwt_secret,
             jwt_issuer,
             access_token_ttl_secs,

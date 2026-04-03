@@ -1,6 +1,8 @@
 mod auth;
 mod authz;
 mod db;
+mod entity;
+mod migration;
 mod http;
 mod products;
 mod orders;
@@ -35,10 +37,10 @@ async fn main() -> Result<(), ApiError> {
         .await
         .map_err(|e| ApiError::internal(format!("failed to bind: {e}")))?;
 
-    let pool = db::try_create_pool()
+    let db = db::try_create_db()
         .await?
         .ok_or_else(|| ApiError::internal("DATABASE_URL is not set".to_string()))?;
-    let state = AppState::from_pool(pool)?;
+    let state = AppState::from_db(db)?;
 
     let app = axum::Router::new()
         .route("/healthz", axum::routing::get(healthz))

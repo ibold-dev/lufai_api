@@ -5,15 +5,23 @@ use axum::{
     response::IntoResponse,
 };
 use paystack::{PaystackClient, ReqwestClient};
+use sea_orm::sea_query::OnConflict;
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QuerySelect, Set,
+    TransactionTrait,
+};
 use serde_json::Value;
 use sha2::Sha512;
 use std::net::SocketAddr;
-
-use hmac::{Hmac, Mac};
-use sqlx::Row;
 use uuid::Uuid;
 
-use crate::{http::error::ApiError, state::AppState};
+use hmac::{Hmac, Mac};
+
+use crate::{
+    entity::{orders as order_tbl, payment_attempt, webhook_event},
+    http::error::ApiError,
+    state::AppState,
+};
 
 const PAYSTACK_WEBHOOK_PROVIDER: &str = "paystack";
 
@@ -50,7 +58,11 @@ fn paystack_webhook_sdk_verify_disabled() -> bool {
 /// Confirms the charge with Paystack using [`TransactionEndpoints::verify_transaction`].
 async fn paystack_verified_amount_cents(reference: &str, secret: &str) -> Option<i64> {
     let client = PaystackClient::<ReqwestClient>::new(secret.to_string());
-    let res = client.transactions.verify_transaction(reference).await.ok()?;
+    let res = client
+        .transactions
+        .verify_transaction(reference)
+        .await
+        .ok()?;
     if !res.status {
         return None;
     }
@@ -71,7 +83,6 @@ fn verify_paystack_signature(
     mac.update(body_bytes);
     let computed = hex::encode(mac.finalize().into_bytes());
 
-    // Header is a hex string; compare case-insensitively.
     if computed.eq_ignore_ascii_case(signature_hex) {
         Ok(())
     } else {
@@ -92,7 +103,6 @@ pub(crate) async fn paystack_webhook(
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> impl IntoResponse {
-    // Always respond quickly; any processing failure should not cause repeated side effects.
     if !is_allowed_ip(peer) {
         return StatusCode::FORBIDDEN;
     }
@@ -127,7 +137,6 @@ pub(crate) async fn paystack_webhook(
         .unwrap_or_default()
         .to_string();
 
-    // For v1 we only handle successful charges.
     if event_type != "charge.success" {
         return StatusCode::OK;
     }
@@ -153,25 +162,29 @@ pub(crate) async fn paystack_webhook(
         }
     };
 
-    // Process-once + atomic state updates.
-    // Intentionally always return 200 on processing errors to avoid retries
-    // causing partial side-effects.
-    let mut tx = match state.pool.begin().await {
+    let tx = match state.db.begin().await {
         Ok(tx) => tx,
         Err(_) => return StatusCode::OK,
     };
 
-    // Insert de-dup record. If it already exists, return immediately.
-    let inserted = match sqlx::query(
-        "INSERT INTO webhook_events (provider, event_type, reference, raw_payload, processed_at)
-         VALUES ($1, $2, $3, $4, NULL)
-         ON CONFLICT (provider, reference) DO NOTHING",
+    let rows = match webhook_event::Entity::insert(webhook_event::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        provider: Set(PAYSTACK_WEBHOOK_PROVIDER.to_string()),
+        event_type: Set(event_type.clone()),
+        reference: Set(Some(reference.clone())),
+        raw_payload: Set(payload.clone()),
+        received_at: Set(chrono::Utc::now()),
+        processed_at: Set(None),
+    })
+    .on_conflict(
+        OnConflict::columns([
+            webhook_event::Column::Provider,
+            webhook_event::Column::Reference,
+        ])
+        .do_nothing()
+        .to_owned(),
     )
-    .bind(PAYSTACK_WEBHOOK_PROVIDER)
-    .bind(&event_type)
-    .bind(&reference)
-    .bind(&payload)
-    .execute(&mut *tx)
+    .exec_without_returning(&tx)
     .await
     {
         Ok(r) => r,
@@ -181,20 +194,16 @@ pub(crate) async fn paystack_webhook(
         }
     };
 
-    if inserted.rows_affected() == 0 {
+    if rows == 0 {
         let _ = tx.commit().await;
         return StatusCode::OK;
     }
 
-    let payment_row = match sqlx::query(
-        "SELECT id, order_id, amount_cents, status
-         FROM payment_attempts
-         WHERE paystack_reference = $1
-         FOR UPDATE",
-    )
-    .bind(&reference)
-    .fetch_optional(&mut *tx)
-    .await
+    let payment_row = match payment_attempt::Entity::find()
+        .filter(payment_attempt::Column::PaystackReference.eq(&reference))
+        .lock_exclusive()
+        .one(&tx)
+        .await
     {
         Ok(r) => r,
         Err(_) => {
@@ -208,67 +217,65 @@ pub(crate) async fn paystack_webhook(
         return StatusCode::OK;
     };
 
-    let payment_attempt_id: Uuid = payment_row.try_get("id").unwrap_or_default();
-    let order_id: Uuid = payment_row.try_get("order_id").unwrap_or_default();
-    let expected_amount: i64 = payment_row.try_get("amount_cents").unwrap_or_default();
-    let current_status: String = payment_row.try_get("status").unwrap_or_default();
+    let order_id = payment_row.order_id;
+    let expected_amount = payment_row.amount_cents;
+    let current_status = payment_row.status.clone();
 
     if amount_cents != expected_amount {
-        let _ = sqlx::query(
-            "UPDATE payment_attempts
-             SET status = 'failed', updated_at = now(), raw_payload = $1
-             WHERE id = $2",
-        )
-        .bind(serde_json::json!({
+        let mut pa = payment_row.into_active_model();
+        pa.status = Set("failed".to_string());
+        pa.raw_payload = Set(Some(serde_json::json!({
             "error": "amount mismatch",
             "expected_amount": expected_amount,
             "verified_amount": amount_cents,
             "reference": reference,
-        }))
-        .bind(payment_attempt_id)
-        .execute(&mut *tx)
-        .await;
+        })));
+        pa.updated_at = Set(chrono::Utc::now());
+        let _ = pa.update(&tx).await;
 
         let _ = tx.commit().await;
         return StatusCode::OK;
     }
 
-    // If already verified, still ensure order is marked paid.
     if current_status != "verified" {
-        let _ = sqlx::query(
-            "UPDATE payment_attempts
-             SET status = 'verified',
-                 updated_at = now(),
-                 raw_payload = COALESCE(raw_payload, '{}'::jsonb) || $1::jsonb
-             WHERE id = $2",
-        )
-        .bind(serde_json::json!({
-            "verified_at": chrono::Utc::now(),
-            "webhook_event": event_type,
-        }))
-        .bind(payment_attempt_id)
-        .execute(&mut *tx)
-        .await;
+        let mut base: Value = payment_row
+            .raw_payload
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({}));
+        if let Value::Object(ref mut m) = base {
+            m.insert(
+                "verified_at".to_string(),
+                serde_json::json!(chrono::Utc::now()),
+            );
+            m.insert(
+                "webhook_event".to_string(),
+                serde_json::json!(event_type.clone()),
+            );
+        }
+        let mut pa = payment_row.into_active_model();
+        pa.status = Set("verified".to_string());
+        pa.raw_payload = Set(Some(base));
+        pa.updated_at = Set(chrono::Utc::now());
+        let _ = pa.update(&tx).await;
     }
 
-    let _ = sqlx::query(
-        "UPDATE orders
-         SET status = 'paid', updated_at = now()
-         WHERE id = $1",
-    )
-    .bind(order_id)
-    .execute(&mut *tx)
-    .await;
+    if let Ok(Some(o)) = order_tbl::Entity::find_by_id(order_id).one(&tx).await {
+        let mut oa = o.into_active_model();
+        oa.status = Set("paid".to_string());
+        oa.updated_at = Set(chrono::Utc::now());
+        let _ = oa.update(&tx).await;
+    }
 
-    let _ = sqlx::query(
-        "UPDATE webhook_events
-         SET processed_at = now()
-         WHERE provider = $1 AND reference = $2",
-    )
-    .bind(PAYSTACK_WEBHOOK_PROVIDER)
-    .bind(&reference)
-    .execute(&mut *tx)
-    .await;
+    if let Ok(Some(ev)) = webhook_event::Entity::find()
+        .filter(webhook_event::Column::Provider.eq(PAYSTACK_WEBHOOK_PROVIDER))
+        .filter(webhook_event::Column::Reference.eq(reference.clone()))
+        .one(&tx)
+        .await
+    {
+        let mut eva = ev.into_active_model();
+        eva.processed_at = Set(Some(chrono::Utc::now()));
+        let _ = eva.update(&tx).await;
+    }
 
     let _ = tx.commit().await;
     StatusCode::OK
@@ -281,6 +288,9 @@ mod tests {
     use axum::http::header::HeaderValue;
     use axum::response::IntoResponse;
     use chrono::{DateTime, Utc};
+    use crate::migration::Migrator;
+    use sea_orm::{Set, SqlxPostgresConnector};
+    use sea_orm_migration::MigratorTrait;
     use sqlx::postgres::PgPoolOptions;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -300,7 +310,7 @@ mod tests {
     async fn paystack_webhook_processes_once_and_marks_order_paid() {
         let database_url = match std::env::var("DATABASE_URL") {
             Ok(v) => v,
-            Err(_) => return, // Skip DB-backed tests when no database is configured.
+            Err(_) => return,
         };
 
         let paystack_secret = "test_paystack_secret";
@@ -315,54 +325,71 @@ mod tests {
             .await
             .expect("connect db");
 
-        sqlx::migrate!("./migrations")
-            .run(&pool)
-            .await
-            .expect("run migrations");
+        let db = SqlxPostgresConnector::from_sqlx_postgres_pool(pool);
+        Migrator::up(&db, None).await.expect("run migrations");
 
         let customer_id = Uuid::new_v4();
         let customer_email = format!("customer+{}@example.com", customer_id);
-        sqlx::query("INSERT INTO customers (id, email, password_hash) VALUES ($1, $2, $3)")
-            .bind(customer_id)
-            .bind(customer_email)
-            .bind("dummy_hash")
-            .execute(&pool)
-            .await
-            .expect("insert customer");
+        let now = chrono::Utc::now();
+        crate::entity::customer::Entity::insert(crate::entity::customer::ActiveModel {
+            id: Set(customer_id),
+            email: Set(customer_email),
+            password_hash: Set("dummy_hash".into()),
+            phone: Set(None),
+            address: Set(None),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+        })
+        .exec(&db)
+        .await
+        .expect("insert customer");
 
         let order_id = Uuid::new_v4();
         let amount_cents: i64 = 5_000;
-        sqlx::query(
-            "INSERT INTO orders (id, customer_id, status, currency, subtotal_cents, shipping_cents, tax_cents, total_cents, delivery_address)
-             VALUES ($1, $2, 'payment_initialized', 'NGN', $3, 0, 0, $3, '{}'::jsonb)",
-        )
-        .bind(order_id)
-        .bind(customer_id)
-        .bind(amount_cents)
-        .execute(&pool)
+        crate::entity::orders::Entity::insert(crate::entity::orders::ActiveModel {
+            id: Set(order_id),
+            customer_id: Set(customer_id),
+            status: Set("payment_initialized".into()),
+            currency: Set("NGN".into()),
+            subtotal_cents: Set(amount_cents),
+            shipping_cents: Set(0),
+            tax_cents: Set(0),
+            total_cents: Set(amount_cents),
+            delivery_address: Set(serde_json::json!({}).into()),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+        })
+        .exec(&db)
         .await
         .expect("insert order");
 
         let payment_attempt_id = Uuid::new_v4();
         let reference = format!("ps_ref_{}", Uuid::new_v4());
-        sqlx::query(
-            "INSERT INTO payment_attempts (id, order_id, provider, paystack_reference, amount_cents, currency, status, raw_payload)
-             VALUES ($1, $2, 'paystack', $3, $4, 'NGN', 'initialized', $5)",
-        )
-        .bind(payment_attempt_id)
-        .bind(order_id)
-        .bind(&reference)
-        .bind(amount_cents)
-        .bind(serde_json::json!({
-            "authorization_url": "https://example.com/auth",
-            "access_code": "ACME"
-        }))
-        .execute(&pool)
+        payment_attempt::Entity::insert(payment_attempt::ActiveModel {
+            id: Set(payment_attempt_id),
+            order_id: Set(order_id),
+            provider: Set("paystack".into()),
+            paystack_reference: Set(reference.clone()),
+            amount_cents: Set(amount_cents),
+            currency: Set("NGN".into()),
+            status: Set("initialized".into()),
+            raw_payload: Set(Some(
+                serde_json::json!({
+                    "authorization_url": "https://example.com/auth",
+                    "access_code": "ACME"
+                })
+                .into(),
+            )),
+            paid_at: Set(None),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+        })
+        .exec(&db)
         .await
         .expect("insert payment attempt");
 
         let state = AppState {
-            pool: pool.clone(),
+            db: db.clone(),
             jwt_secret: "test".to_string(),
             jwt_issuer: "test".to_string(),
             access_token_ttl_secs: 3600,
@@ -381,7 +408,6 @@ mod tests {
         mac.update(&body_bytes);
         let signature_hex = hex::encode(mac.finalize().into_bytes());
 
-        // Use an allowlisted IP so the handler proceeds.
         let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(52, 31, 139, 75)), 12345);
 
         let mut headers = HeaderMap::new();
@@ -400,36 +426,30 @@ mod tests {
         .into_response();
         assert_eq!(resp1.status(), StatusCode::OK);
 
-        let payment_status_1: String =
-            sqlx::query("SELECT status FROM payment_attempts WHERE id = $1")
-                .bind(payment_attempt_id)
-                .fetch_one(&pool)
-                .await
-                .expect("fetch payment status")
-                .try_get("status")
-                .expect("try_get status");
-
-        let order_status_1: String = sqlx::query("SELECT status FROM orders WHERE id = $1")
-            .bind(order_id)
-            .fetch_one(&pool)
+        let payment_status_1: String = payment_attempt::Entity::find_by_id(payment_attempt_id)
+            .one(&db)
             .await
-            .expect("fetch order status")
-            .try_get("status")
-            .expect("try_get status");
+            .expect("fetch payment")
+            .expect("row")
+            .status;
 
-        let processed_at_1: DateTime<Utc> = sqlx::query(
-            "SELECT processed_at
-             FROM webhook_events
-             WHERE provider = 'paystack' AND reference = $1",
-        )
-        .bind(&reference)
-        .fetch_one(&pool)
-        .await
-        .expect("fetch processed_at")
-        .try_get("processed_at")
-        .expect("try_get processed_at");
+        let order_status_1: String = order_tbl::Entity::find_by_id(order_id)
+            .one(&db)
+            .await
+            .expect("fetch order")
+            .expect("row")
+            .status;
 
-        // Second call with the same payload/reference should be de-duplicated.
+        let processed_at_1: DateTime<Utc> = webhook_event::Entity::find()
+            .filter(webhook_event::Column::Provider.eq("paystack"))
+            .filter(webhook_event::Column::Reference.eq(Some(reference.clone())))
+            .one(&db)
+            .await
+            .expect("fetch webhook")
+            .expect("row")
+            .processed_at
+            .expect("processed_at");
+
         let resp2 = paystack_webhook(
             ConnectInfo(peer),
             Extension(state),
@@ -440,34 +460,29 @@ mod tests {
         .into_response();
         assert_eq!(resp2.status(), StatusCode::OK);
 
-        let payment_status_2: String =
-            sqlx::query("SELECT status FROM payment_attempts WHERE id = $1")
-                .bind(payment_attempt_id)
-                .fetch_one(&pool)
-                .await
-                .expect("fetch payment status")
-                .try_get("status")
-                .expect("try_get status");
-
-        let order_status_2: String = sqlx::query("SELECT status FROM orders WHERE id = $1")
-            .bind(order_id)
-            .fetch_one(&pool)
+        let payment_status_2: String = payment_attempt::Entity::find_by_id(payment_attempt_id)
+            .one(&db)
             .await
-            .expect("fetch order status")
-            .try_get("status")
-            .expect("try_get status");
+            .expect("fetch payment")
+            .expect("row")
+            .status;
 
-        let processed_at_2: DateTime<Utc> = sqlx::query(
-            "SELECT processed_at
-             FROM webhook_events
-             WHERE provider = 'paystack' AND reference = $1",
-        )
-        .bind(&reference)
-        .fetch_one(&pool)
-        .await
-        .expect("fetch processed_at")
-        .try_get("processed_at")
-        .expect("try_get processed_at");
+        let order_status_2: String = order_tbl::Entity::find_by_id(order_id)
+            .one(&db)
+            .await
+            .expect("fetch order")
+            .expect("row")
+            .status;
+
+        let processed_at_2: DateTime<Utc> = webhook_event::Entity::find()
+            .filter(webhook_event::Column::Provider.eq("paystack"))
+            .filter(webhook_event::Column::Reference.eq(Some(reference.clone())))
+            .one(&db)
+            .await
+            .expect("fetch webhook")
+            .expect("row")
+            .processed_at
+            .expect("processed_at");
 
         assert_eq!(payment_status_1, "verified");
         assert_eq!(order_status_1, "paid");
