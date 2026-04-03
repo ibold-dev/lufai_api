@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::entity::{product, promotion, promotion_product};
 use crate::http::error::ApiError;
+use crate::payments::methods;
 
 #[derive(Debug, Clone)]
 pub struct PricedLine {
@@ -15,6 +16,8 @@ pub struct PricedLine {
     pub list_unit_price_cents: i64,
     pub unit_price_cents: i64,
     pub promotion_id: Option<Uuid>,
+    /// Effective allowed payment methods for this line (product defaults or promo override).
+    pub allowed_payment_methods: Vec<String>,
 }
 
 fn promo_is_live(p: &promotion::Model, now: chrono::DateTime<Utc>) -> bool {
@@ -127,12 +130,16 @@ pub async fn price_order_lines(
             None => (list, None),
         };
 
+        let allowed_payment_methods =
+            methods::line_effective_methods(p, best);
+
         out.push(PricedLine {
             product_id,
             quantity,
             list_unit_price_cents: list,
             unit_price_cents,
             promotion_id,
+            allowed_payment_methods,
         });
     }
 

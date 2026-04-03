@@ -7,6 +7,7 @@ mod m20260403000003_affiliates;
 mod m20260403000004_carts;
 mod m20260403000005_product_images;
 mod m20260403000006_promotions;
+mod m20260403000007_payment_methods;
 
 use sea_orm_migration::prelude::*;
 
@@ -23,6 +24,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260403000004_carts::Migration),
             Box::new(m20260403000005_product_images::Migration),
             Box::new(m20260403000006_promotions::Migration),
+            Box::new(m20260403000007_payment_methods::Migration),
         ]
     }
 }

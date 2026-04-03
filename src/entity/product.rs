@@ -14,6 +14,9 @@ pub struct Model {
     pub currency: String,
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub dimensions: Option<Json>,
+    /// When `None`, all methods (`electronic`, `cash_on_delivery`, `installment`) apply.
+    #[sea_orm(column_type = "Json", nullable)]
+    pub allowed_payment_methods: Option<Vec<String>>,
     pub status: String,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,

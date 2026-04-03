@@ -17,6 +17,9 @@ pub struct Model {
     pub discount_percent: Option<i32>,
     pub discount_fixed_cents: Option<i64>,
     pub priority: i32,
+    /// When `None`, line inherits product rules. When set, overrides for discounted lines.
+    #[sea_orm(column_type = "Json", nullable)]
+    pub allowed_payment_methods: Option<Vec<String>>,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }

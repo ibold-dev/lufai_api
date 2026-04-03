@@ -14,6 +14,9 @@ pub struct Model {
     pub shipping_cents: i64,
     pub tax_cents: i64,
     pub total_cents: i64,
+    /// Intersection of allowed methods for all lines at checkout (snapshot).
+    #[sea_orm(column_type = "Json")]
+    pub allowed_payment_methods: Vec<String>,
     #[sea_orm(column_type = "JsonBinary")]
     pub delivery_address: Json,
     pub created_at: DateTimeUtc,

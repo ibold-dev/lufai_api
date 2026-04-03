@@ -18,6 +18,7 @@ use crate::{
     authz::casbin as casbin_authz,
     entity::{product, product_image},
     http::error::ApiError,
+    payments::methods as payment_methods,
     http::limits::{
         MAX_PRODUCT_DESCRIPTION_LEN, MAX_PRODUCT_IMAGE_ALT_LEN, MAX_PRODUCT_IMAGE_URL_LEN,
         MAX_PRODUCT_IMAGES_PER_PRODUCT, MAX_PRODUCT_TITLE_LEN,
@@ -67,6 +68,8 @@ pub struct CreateProductRequest {
     /// Price in subunits (e.g., NGN kobo), not base currency.
     pub price_cents: i64,
     pub dimensions: Option<Value>,
+    /// When omitted, all methods apply (`electronic`, `cash_on_delivery`, `installment`).
+    pub allowed_payment_methods: Option<Vec<String>>,
     /// Gallery. When non-empty, exactly one entry must have `is_primary: true`.
     #[serde(default)]
     pub images: Vec<ProductImageInput>,
@@ -79,6 +82,8 @@ pub struct UpdateProductRequest {
     pub description: Option<String>,
     pub price_cents: Option<i64>,
     pub dimensions: Option<Value>,
+    /// When set to a non-empty list, restricts methods. Empty list clears (all methods).
+    pub allowed_payment_methods: Option<Vec<String>>,
     /// When set, replaces the entire image set for this product (omit to leave unchanged).
     pub images: Option<Vec<ProductImageInput>>,
 }
@@ -113,6 +118,8 @@ pub struct ProductResponse {
     pub currency: String,
     pub dimensions: Option<Value>,
     pub status: String,
+    /// `None` means all payment methods are allowed.
+    pub allowed_payment_methods: Option<Vec<String>>,
     /// Ordered by `sort_order`, then `id`.
     pub images: Vec<ProductImageResponse>,
 }
@@ -213,6 +220,9 @@ fn validate_create_product(req: &CreateProductRequest) -> Result<(), ApiError> {
     }
     check_optional_json_value_size("dimensions", &req.dimensions)?;
     validate_product_images(&req.images)?;
+    if let Some(ref m) = req.allowed_payment_methods {
+        payment_methods::validate_payment_methods_list(m)?;
+    }
     Ok(())
 }
 
@@ -241,6 +251,11 @@ fn validate_update_product(req: &UpdateProductRequest) -> Result<(), ApiError> {
     check_optional_json_value_size("dimensions", &req.dimensions)?;
     if let Some(ref imgs) = req.images {
         validate_product_images(imgs)?;
+    }
+    if let Some(ref m) = req.allowed_payment_methods {
+        if !m.is_empty() {
+            payment_methods::validate_payment_methods_list(m)?;
+        }
     }
     Ok(())
 }
@@ -331,6 +346,7 @@ fn model_to_response(m: product::Model, images: Vec<ProductImageResponse>) -> Pr
         currency: m.currency,
         dimensions: m.dimensions,
         status: m.status,
+        allowed_payment_methods: m.allowed_payment_methods,
         images,
     }
 }
@@ -429,6 +445,7 @@ pub(crate) async fn create_product(
         price_cents: Set(req.price_cents),
         currency: Set("NGN".to_string()),
         dimensions: Set(req.dimensions),
+        allowed_payment_methods: Set(req.allowed_payment_methods.clone()),
         status: Set("pending".to_string()),
         created_at: Set(now),
         updated_at: Set(now),
@@ -548,6 +565,14 @@ pub(crate) async fn update_product(
     }
     if let Some(d) = req.dimensions {
         active.dimensions = Set(Some(d));
+    }
+    if let Some(v) = req.allowed_payment_methods {
+        if v.is_empty() {
+            active.allowed_payment_methods = Set(None);
+        } else {
+            payment_methods::validate_payment_methods_list(&v)?;
+            active.allowed_payment_methods = Set(Some(v));
+        }
     }
     active.updated_at = Set(now);
 

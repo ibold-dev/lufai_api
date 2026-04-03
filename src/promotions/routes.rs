@@ -21,6 +21,7 @@ use crate::{
     authz::casbin as casbin_authz,
     entity::{product, promotion, promotion_product},
     http::error::ApiError,
+    payments::methods as payment_methods,
     http::limits::{MAX_PROMOTION_NAME_LEN, MAX_PROMOTION_PRODUCT_IDS},
     state::AppState,
 };
@@ -66,6 +67,8 @@ pub struct CreatePromotionRequest {
     pub discount_fixed_cents: Option<i64>,
     #[serde(default)]
     pub priority: i32,
+    /// When set, discounted lines use only these methods (overrides product defaults).
+    pub allowed_payment_methods: Option<Vec<String>>,
     pub product_ids: Vec<Uuid>,
 }
 
@@ -83,6 +86,8 @@ pub struct UpdatePromotionRequest {
     pub discount_percent: Option<i32>,
     pub discount_fixed_cents: Option<i64>,
     pub priority: Option<i32>,
+    /// Empty list clears override (inherit from product). Omit to leave unchanged.
+    pub allowed_payment_methods: Option<Vec<String>>,
     pub product_ids: Option<Vec<Uuid>>,
 }
 
@@ -99,6 +104,8 @@ pub struct PromotionResponse {
     pub discount_percent: Option<i32>,
     pub discount_fixed_cents: Option<i64>,
     pub priority: i32,
+    /// When `None`, discounted lines inherit product payment rules.
+    pub allowed_payment_methods: Option<Vec<String>>,
     pub product_ids: Vec<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -264,6 +271,9 @@ fn validate_create(req: &CreatePromotionRequest) -> Result<(), ApiError> {
     if set.len() != req.product_ids.len() {
         return Err(ApiError::bad_request("product_ids must be unique"));
     }
+    if let Some(ref m) = req.allowed_payment_methods {
+        payment_methods::validate_payment_methods_list(m)?;
+    }
     Ok(())
 }
 
@@ -290,6 +300,11 @@ fn validate_update_patch(req: &UpdatePromotionRequest) -> Result<(), ApiError> {
         }
         if t.chars().count() > MAX_PROMOTION_NAME_LEN {
             return Err(ApiError::bad_request("name is too long"));
+        }
+    }
+    if let Some(ref m) = req.allowed_payment_methods {
+        if !m.is_empty() {
+            payment_methods::validate_payment_methods_list(m)?;
         }
     }
     Ok(())
@@ -426,6 +441,7 @@ async fn model_to_response(
         discount_percent: m.discount_percent,
         discount_fixed_cents: m.discount_fixed_cents,
         priority: m.priority,
+        allowed_payment_methods: m.allowed_payment_methods,
         product_ids,
         created_at: m.created_at,
         updated_at: m.updated_at,
@@ -477,6 +493,7 @@ pub(crate) async fn create_seller_promotion(
         discount_percent: Set(req.discount_percent),
         discount_fixed_cents: Set(req.discount_fixed_cents),
         priority: Set(req.priority),
+        allowed_payment_methods: Set(req.allowed_payment_methods.clone()),
         created_at: Set(now),
         updated_at: Set(now),
     };
@@ -631,6 +648,14 @@ pub(crate) async fn update_seller_promotion(
     if let Some(p) = req.priority {
         active.priority = Set(p);
     }
+    if let Some(v) = req.allowed_payment_methods {
+        if v.is_empty() {
+            active.allowed_payment_methods = Set(None);
+        } else {
+            payment_methods::validate_payment_methods_list(&v)?;
+            active.allowed_payment_methods = Set(Some(v));
+        }
+    }
     active.updated_at = Set(now);
 
     let txn = state.db.begin().await?;
@@ -729,6 +754,7 @@ pub(crate) async fn create_admin_promotion(
         discount_percent: Set(req.discount_percent),
         discount_fixed_cents: Set(req.discount_fixed_cents),
         priority: Set(req.priority),
+        allowed_payment_methods: Set(req.allowed_payment_methods.clone()),
         created_at: Set(now),
         updated_at: Set(now),
     };
@@ -882,6 +908,14 @@ pub(crate) async fn update_admin_promotion(
     active.discount_fixed_cents = Set(discount_fixed_cents);
     if let Some(p) = req.priority {
         active.priority = Set(p);
+    }
+    if let Some(v) = req.allowed_payment_methods {
+        if v.is_empty() {
+            active.allowed_payment_methods = Set(None);
+        } else {
+            payment_methods::validate_payment_methods_list(&v)?;
+            active.allowed_payment_methods = Set(Some(v));
+        }
     }
     active.updated_at = Set(now);
 

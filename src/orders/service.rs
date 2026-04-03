@@ -12,6 +12,7 @@ use crate::{
         cart, cart_item, customer_order_idempotency, order_item, orders as order_tbl,
     },
     http::error::ApiError,
+    payments::methods,
     http::limits::{MAX_LINE_ITEM_QUANTITY, MAX_ORDER_LINE_ITEMS},
     http::validation::check_json_value_size,
     promotions::pricing,
@@ -93,6 +94,7 @@ pub async fn fetch_order_with_items(
         shipping_cents: order_row.shipping_cents,
         tax_cents: order_row.tax_cents,
         total_cents: order_row.total_cents,
+        allowed_payment_methods: order_row.allowed_payment_methods.clone(),
         delivery_address: order_row.delivery_address,
         items,
     })
@@ -132,6 +134,12 @@ pub async fn create_order_from_request(
         .collect::<Result<Vec<_>, ApiError>>()?;
 
     let priced_lines = pricing::price_order_lines(&state.db, &line_inputs).await?;
+
+    let line_method_vecs: Vec<Vec<String>> = priced_lines
+        .iter()
+        .map(|pl| pl.allowed_payment_methods.clone())
+        .collect();
+    let allowed_payment_methods = methods::intersect_line_methods(&line_method_vecs)?;
 
     let mut subtotal_cents: i64 = 0;
     for pl in &priced_lines {
@@ -177,6 +185,7 @@ pub async fn create_order_from_request(
         shipping_cents: Set(shipping_cents),
         tax_cents: Set(tax_cents),
         total_cents: Set(total_cents),
+        allowed_payment_methods: Set(allowed_payment_methods),
         delivery_address: Set(req.delivery_address.clone()),
         created_at: Set(now),
         updated_at: Set(now),

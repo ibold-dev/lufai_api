@@ -13,6 +13,7 @@ use crate::{
     entity::{customer, order_payment_idempotency, orders as order_tbl, payment_attempt},
     http::error::ApiError,
     http::limits::MAX_IDEMPOTENCY_KEY_LEN,
+    payments::methods as payment_methods,
     state::AppState,
 };
 
@@ -64,6 +65,8 @@ pub struct OrderResponse {
     pub shipping_cents: i64,
     pub tax_cents: i64,
     pub total_cents: i64,
+    /// Intersection of per-line allowed methods at order creation (snapshot).
+    pub allowed_payment_methods: Vec<String>,
     pub delivery_address: serde_json::Value,
     pub items: Vec<OrderItemResponse>,
 }
@@ -316,6 +319,12 @@ pub(crate) async fn initialize_paystack(
         .await?
         .ok_or_else(|| ApiError::not_found("order not found"))?;
 
+    if !payment_methods::order_allows_electronic(&order_row.allowed_payment_methods) {
+        return Err(ApiError::bad_request(
+            "electronic payment is not allowed for this order",
+        ));
+    }
+
     let order_total_cents = order_row.total_cents;
     let currency = order_row.currency.clone();
 
@@ -547,6 +556,7 @@ mod tests {
             price_cents: Set(2_500),
             currency: Set("NGN".into()),
             dimensions: Set(None),
+            allowed_payment_methods: Set(None),
             status: Set("approved".into()),
             created_at: Set(now),
             updated_at: Set(now),
@@ -671,6 +681,7 @@ mod tests {
             price_cents: Set(3_000),
             currency: Set("NGN".into()),
             dimensions: Set(None),
+            allowed_payment_methods: Set(None),
             status: Set("approved".into()),
             created_at: Set(now),
             updated_at: Set(now),
@@ -705,6 +716,7 @@ mod tests {
             shipping_cents: Set(0),
             tax_cents: Set(0),
             total_cents: Set(amount_cents),
+            allowed_payment_methods: Set(crate::payments::methods::all_payment_methods()),
             delivery_address: Set(serde_json::json!({})),
             created_at: Set(now),
             updated_at: Set(now),
