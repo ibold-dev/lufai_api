@@ -7,16 +7,21 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, IntoActiveModel, QueryFilter,
+    QueryOrder, Set, TransactionTrait,
 };
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::{
     auth::jwt,
     authz::casbin as casbin_authz,
-    entity::product,
+    entity::{product, product_image},
     http::error::ApiError,
-    http::limits::{MAX_PRODUCT_DESCRIPTION_LEN, MAX_PRODUCT_TITLE_LEN},
+    http::limits::{
+        MAX_PRODUCT_DESCRIPTION_LEN, MAX_PRODUCT_IMAGE_ALT_LEN, MAX_PRODUCT_IMAGE_URL_LEN,
+        MAX_PRODUCT_IMAGES_PER_PRODUCT, MAX_PRODUCT_TITLE_LEN,
+    },
     http::validation::check_optional_json_value_size,
     state::AppState,
 };
@@ -62,6 +67,9 @@ pub struct CreateProductRequest {
     /// Price in subunits (e.g., NGN kobo), not base currency.
     pub price_cents: i64,
     pub dimensions: Option<Value>,
+    /// Gallery. When non-empty, exactly one entry must have `is_primary: true`.
+    #[serde(default)]
+    pub images: Vec<ProductImageInput>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,6 +79,28 @@ pub struct UpdateProductRequest {
     pub description: Option<String>,
     pub price_cents: Option<i64>,
     pub dimensions: Option<Value>,
+    /// When set, replaces the entire image set for this product (omit to leave unchanged).
+    pub images: Option<Vec<ProductImageInput>>,
+}
+
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct ProductImageInput {
+    /// Public HTTPS URL (e.g. CDN). Trimmed before storage.
+    pub url: String,
+    /// Lower values appear first; defaults to the index in the `images` array.
+    pub sort_order: Option<i32>,
+    #[serde(default)]
+    pub is_primary: bool,
+    pub alt_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct ProductImageResponse {
+    pub id: Uuid,
+    pub url: String,
+    pub sort_order: i32,
+    pub is_primary: bool,
+    pub alt_text: Option<String>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -83,6 +113,8 @@ pub struct ProductResponse {
     pub currency: String,
     pub dimensions: Option<Value>,
     pub status: String,
+    /// Ordered by `sort_order`, then `id`.
+    pub images: Vec<ProductImageResponse>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -180,6 +212,7 @@ fn validate_create_product(req: &CreateProductRequest) -> Result<(), ApiError> {
         return Err(ApiError::bad_request("description is too long"));
     }
     check_optional_json_value_size("dimensions", &req.dimensions)?;
+    validate_product_images(&req.images)?;
     Ok(())
 }
 
@@ -206,10 +239,89 @@ fn validate_update_product(req: &UpdateProductRequest) -> Result<(), ApiError> {
         return Err(ApiError::bad_request("price_cents must be >= 0"));
     }
     check_optional_json_value_size("dimensions", &req.dimensions)?;
+    if let Some(ref imgs) = req.images {
+        validate_product_images(imgs)?;
+    }
     Ok(())
 }
 
-fn model_to_response(m: product::Model) -> ProductResponse {
+fn validate_product_images(inputs: &[ProductImageInput]) -> Result<(), ApiError> {
+    if inputs.len() > MAX_PRODUCT_IMAGES_PER_PRODUCT {
+        return Err(ApiError::bad_request("too many images"));
+    }
+    let mut primary_count = 0usize;
+    for img in inputs {
+        let u = img.url.trim();
+        if u.is_empty() {
+            return Err(ApiError::bad_request("image url must not be empty"));
+        }
+        if u.len() > MAX_PRODUCT_IMAGE_URL_LEN {
+            return Err(ApiError::bad_request("image url is too long"));
+        }
+        if img.is_primary {
+            primary_count += 1;
+        }
+        if let Some(ref a) = img.alt_text
+            && a.chars().count() > MAX_PRODUCT_IMAGE_ALT_LEN
+        {
+            return Err(ApiError::bad_request("image alt_text is too long"));
+        }
+    }
+    if !inputs.is_empty() && primary_count != 1 {
+        return Err(ApiError::bad_request(
+            "exactly one image must have is_primary true",
+        ));
+    }
+    Ok(())
+}
+
+fn image_row_to_response(m: product_image::Model) -> ProductImageResponse {
+    ProductImageResponse {
+        id: m.id,
+        url: m.url,
+        sort_order: m.sort_order,
+        is_primary: m.is_primary,
+        alt_text: m.alt_text,
+    }
+}
+
+async fn load_images_for_product(
+    db: &sea_orm::DatabaseConnection,
+    product_id: Uuid,
+) -> Result<Vec<ProductImageResponse>, ApiError> {
+    let rows = product_image::Entity::find()
+        .filter(product_image::Column::ProductId.eq(product_id))
+        .order_by_asc(product_image::Column::SortOrder)
+        .order_by_asc(product_image::Column::Id)
+        .all(db)
+        .await?;
+    Ok(rows.into_iter().map(image_row_to_response).collect())
+}
+
+async fn load_images_by_product_ids(
+    db: &sea_orm::DatabaseConnection,
+    ids: &[Uuid],
+) -> Result<HashMap<Uuid, Vec<ProductImageResponse>>, ApiError> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let id_vec: Vec<Uuid> = ids.to_vec();
+    let rows = product_image::Entity::find()
+        .filter(product_image::Column::ProductId.is_in(id_vec))
+        .order_by_asc(product_image::Column::SortOrder)
+        .order_by_asc(product_image::Column::Id)
+        .all(db)
+        .await?;
+    let mut map: HashMap<Uuid, Vec<ProductImageResponse>> = HashMap::new();
+    for r in rows {
+        map.entry(r.product_id)
+            .or_default()
+            .push(image_row_to_response(r));
+    }
+    Ok(map)
+}
+
+fn model_to_response(m: product::Model, images: Vec<ProductImageResponse>) -> ProductResponse {
     ProductResponse {
         id: m.id,
         seller_id: m.seller_id,
@@ -219,7 +331,49 @@ fn model_to_response(m: product::Model) -> ProductResponse {
         currency: m.currency,
         dimensions: m.dimensions,
         status: m.status,
+        images,
     }
+}
+
+async fn insert_product_images<C: ConnectionTrait>(
+    db: &C,
+    product_id: Uuid,
+    inputs: &[ProductImageInput],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), ApiError> {
+    for (idx, input) in inputs.iter().enumerate() {
+        let sort_order = input.sort_order.unwrap_or(idx as i32);
+        let url = input.url.trim().to_string();
+        let am = product_image::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            product_id: Set(product_id),
+            url: Set(url),
+            sort_order: Set(sort_order),
+            is_primary: Set(input.is_primary),
+            alt_text: Set(input.alt_text.clone()),
+            created_at: Set(now),
+            updated_at: Set(now),
+        };
+        product_image::Entity::insert(am).exec(db).await?;
+    }
+    Ok(())
+}
+
+async fn replace_product_images<C: ConnectionTrait>(
+    db: &C,
+    product_id: Uuid,
+    inputs: &[ProductImageInput],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), ApiError> {
+    validate_product_images(inputs)?;
+    product_image::Entity::delete_many()
+        .filter(product_image::Column::ProductId.eq(product_id))
+        .exec(db)
+        .await?;
+    if inputs.is_empty() {
+        return Ok(());
+    }
+    insert_product_images(db, product_id, inputs, now).await
 }
 
 #[utoipa::path(
@@ -280,11 +434,19 @@ pub(crate) async fn create_product(
         updated_at: Set(now),
     };
 
-    let inserted = product::Entity::insert(active)
-        .exec_with_returning(&state.db)
-        .await?;
+    let txn = state.db.begin().await?;
+    product::Entity::insert(active).exec(&txn).await?;
+    if !req.images.is_empty() {
+        insert_product_images(&txn, id, &req.images, now).await?;
+    }
+    txn.commit().await?;
 
-    Ok(Json(model_to_response(inserted)))
+    let inserted = product::Entity::find_by_id(id)
+        .one(&state.db)
+        .await?
+        .ok_or_else(|| ApiError::internal("product insert missing".to_string()))?;
+    let images = load_images_for_product(&state.db, id).await?;
+    Ok(Json(model_to_response(inserted, images)))
 }
 
 #[utoipa::path(
@@ -320,7 +482,16 @@ pub(crate) async fn list_my_products(
         .all(&state.db)
         .await?;
 
-    Ok(Json(rows.into_iter().map(model_to_response).collect()))
+    let ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
+    let img_map = load_images_by_product_ids(&state.db, &ids).await?;
+    let out = rows
+        .into_iter()
+        .map(|m| {
+            let imgs = img_map.get(&m.id).cloned().unwrap_or_default();
+            model_to_response(m, imgs)
+        })
+        .collect();
+    Ok(Json(out))
 }
 
 #[utoipa::path(
@@ -364,6 +535,7 @@ pub(crate) async fn update_product(
         .await?
         .ok_or_else(|| ApiError::not_found("product not found"))?;
 
+    let now = chrono::Utc::now();
     let mut active: product::ActiveModel = existing.into_active_model();
     if let Some(t) = req.title {
         active.title = Set(t);
@@ -377,10 +549,20 @@ pub(crate) async fn update_product(
     if let Some(d) = req.dimensions {
         active.dimensions = Set(Some(d));
     }
-    active.updated_at = Set(chrono::Utc::now());
+    active.updated_at = Set(now);
+
+    if let Some(ref imgs) = req.images {
+        let txn = state.db.begin().await?;
+        let updated = active.update(&txn).await?;
+        replace_product_images(&txn, product_id, imgs, now).await?;
+        txn.commit().await?;
+        let images = load_images_for_product(&state.db, product_id).await?;
+        return Ok(Json(model_to_response(updated, images)));
+    }
 
     let updated = active.update(&state.db).await?;
-    Ok(Json(model_to_response(updated)))
+    let images = load_images_for_product(&state.db, product_id).await?;
+    Ok(Json(model_to_response(updated, images)))
 }
 
 #[utoipa::path(
@@ -458,7 +640,16 @@ pub(crate) async fn list_pending_products(
         .all(&state.db)
         .await?;
 
-    Ok(Json(rows.into_iter().map(model_to_response).collect()))
+    let ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
+    let img_map = load_images_by_product_ids(&state.db, &ids).await?;
+    let out = rows
+        .into_iter()
+        .map(|m| {
+            let imgs = img_map.get(&m.id).cloned().unwrap_or_default();
+            model_to_response(m, imgs)
+        })
+        .collect();
+    Ok(Json(out))
 }
 
 #[utoipa::path(
@@ -499,8 +690,9 @@ pub(crate) async fn approve_product(
     active.status = Set("approved".to_string());
     active.updated_at = Set(chrono::Utc::now());
     let updated = active.update(&state.db).await?;
+    let images = load_images_for_product(&state.db, product_id).await?;
 
-    Ok(Json(model_to_response(updated)))
+    Ok(Json(model_to_response(updated, images)))
 }
 
 #[utoipa::path(
@@ -541,6 +733,7 @@ pub(crate) async fn reject_product(
     active.status = Set("rejected".to_string());
     active.updated_at = Set(chrono::Utc::now());
     let updated = active.update(&state.db).await?;
+    let images = load_images_for_product(&state.db, product_id).await?;
 
-    Ok(Json(model_to_response(updated)))
+    Ok(Json(model_to_response(updated, images)))
 }

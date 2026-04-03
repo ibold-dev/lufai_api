@@ -11,5 +11,6 @@ pub mod order_payment_idempotency;
 pub mod orders;
 pub mod payment_attempt;
 pub mod product;
+pub mod product_image;
 pub mod seller;
 pub mod webhook_event;

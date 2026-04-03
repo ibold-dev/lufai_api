@@ -24,6 +24,15 @@ pub const MAX_PRODUCT_TITLE_LEN: usize = 500;
 /// Product description (longer copy).
 pub const MAX_PRODUCT_DESCRIPTION_LEN: usize = 20_000;
 
+/// Max gallery images per product.
+pub const MAX_PRODUCT_IMAGES_PER_PRODUCT: usize = 20;
+
+/// Stored image URL length (HTTPS CDN URLs; migration `CHECK` matches).
+pub const MAX_PRODUCT_IMAGE_URL_LEN: usize = 2048;
+
+/// Optional accessibility label for a product image.
+pub const MAX_PRODUCT_IMAGE_ALT_LEN: usize = 500;
+
 /// Password register/login (Argon2; cap to limit CPU DoS).
 pub const MAX_PASSWORD_BYTES: usize = 256;
 
