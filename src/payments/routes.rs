@@ -360,6 +360,8 @@ mod tests {
             tax_cents: Set(0),
             total_cents: Set(amount_cents),
             allowed_payment_methods: Set(crate::payments::methods::all_payment_methods()),
+            payment_channel: Set(None),
+            installment_plan: Set(None),
             delivery_address: Set(serde_json::json!({})),
             created_at: Set(now),
             updated_at: Set(now),

@@ -17,6 +17,10 @@ pub struct Model {
     /// Intersection of allowed methods for all lines at checkout (snapshot).
     #[sea_orm(column_type = "Json")]
     pub allowed_payment_methods: Vec<String>,
+    /// Set when customer chooses COD, installment, or Paystack (electronic).
+    pub payment_channel: Option<String>,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub installment_plan: Option<Json>,
     #[sea_orm(column_type = "JsonBinary")]
     pub delivery_address: Json,
     pub created_at: DateTimeUtc,

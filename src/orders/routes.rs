@@ -28,6 +28,7 @@ pub fn routes() -> Router {
             "/orders/{order_id}/paystack/initialize",
             post(initialize_paystack),
         )
+        .merge(super::alternate_payment::routes())
 }
 
 #[derive(Debug, Deserialize, Clone, utoipa::ToSchema)]
@@ -67,6 +68,10 @@ pub struct OrderResponse {
     pub total_cents: i64,
     /// Intersection of per-line allowed methods at order creation (snapshot).
     pub allowed_payment_methods: Vec<String>,
+    /// `electronic` after Paystack init; `cash_on_delivery` / `installment` after those flows.
+    pub payment_channel: Option<String>,
+    /// Present when [`Self::payment_channel`] is `installment`.
+    pub installment_plan: Option<serde_json::Value>,
     pub delivery_address: serde_json::Value,
     pub items: Vec<OrderItemResponse>,
 }
@@ -127,11 +132,11 @@ pub(crate) fn idempotency_key(headers: &HeaderMap) -> Result<String, ApiError> {
     Ok(key.to_string())
 }
 
-fn order_obj(order_id: Uuid) -> String {
+pub(crate) fn order_obj(order_id: Uuid) -> String {
     format!("/orders/{order_id}")
 }
 
-async fn authorize_or_forbid(
+pub(crate) async fn authorize_or_forbid(
     actor_sub: &str,
     obj: &str,
     act: &str,
@@ -482,6 +487,7 @@ pub(crate) async fn initialize_paystack(
         .ok_or_else(|| ApiError::not_found("order not found"))?
         .into_active_model();
     ord.status = Set("payment_initialized".to_string());
+    ord.payment_channel = Set(Some(payment_methods::ELECTRONIC.to_string()));
     ord.updated_at = Set(chrono::Utc::now());
     ord.update(&state.db).await?;
 
@@ -717,6 +723,8 @@ mod tests {
             tax_cents: Set(0),
             total_cents: Set(amount_cents),
             allowed_payment_methods: Set(crate::payments::methods::all_payment_methods()),
+            payment_channel: Set(None),
+            installment_plan: Set(None),
             delivery_address: Set(serde_json::json!({})),
             created_at: Set(now),
             updated_at: Set(now),

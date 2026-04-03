@@ -7,6 +7,7 @@ pub mod cart_item;
 pub mod customer;
 pub mod customer_order_idempotency;
 pub mod order_item;
+pub mod order_payment_flow_idempotency;
 pub mod order_payment_idempotency;
 pub mod orders;
 pub mod payment_attempt;

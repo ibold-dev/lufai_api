@@ -57,6 +57,8 @@ impl Modify for SecurityAddon {
         crate::cart::routes::delete_cart_item,
         crate::cart::routes::checkout_cart,
         crate::orders::routes::initialize_paystack,
+        crate::orders::alternate_payment::confirm_cash_on_delivery,
+        crate::orders::alternate_payment::start_installment,
         crate::payments::routes::paystack_webhook,
         crate::promotions::routes::create_seller_promotion,
         crate::promotions::routes::list_seller_promotions,

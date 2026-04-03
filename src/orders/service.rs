@@ -95,6 +95,8 @@ pub async fn fetch_order_with_items(
         tax_cents: order_row.tax_cents,
         total_cents: order_row.total_cents,
         allowed_payment_methods: order_row.allowed_payment_methods.clone(),
+        payment_channel: order_row.payment_channel.clone(),
+        installment_plan: order_row.installment_plan.clone().map(Into::into),
         delivery_address: order_row.delivery_address,
         items,
     })
@@ -186,6 +188,8 @@ pub async fn create_order_from_request(
         tax_cents: Set(tax_cents),
         total_cents: Set(total_cents),
         allowed_payment_methods: Set(allowed_payment_methods),
+        payment_channel: Set(None),
+        installment_plan: Set(None),
         delivery_address: Set(req.delivery_address.clone()),
         created_at: Set(now),
         updated_at: Set(now),
