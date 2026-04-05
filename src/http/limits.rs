@@ -36,6 +36,9 @@ pub const MAX_PRODUCT_IMAGE_ALT_LEN: usize = 500;
 /// Password register/login (Argon2; cap to limit CPU DoS).
 pub const MAX_PASSWORD_BYTES: usize = 256;
 
+/// Admin-issued login code (Argon2 input; same cap as passwords).
+pub const MAX_LOGIN_CODE_BYTES: usize = 256;
+
 /// Minimum JWT signing secret length (bytes).
 pub const MIN_JWT_SECRET_BYTES: usize = 32;
 

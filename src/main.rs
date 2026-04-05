@@ -1,3 +1,4 @@
+mod admin;
 mod auth;
 mod authz;
 mod db;
@@ -72,6 +73,7 @@ async fn main() -> Result<(), ApiError> {
 
     let v1_business = axum::Router::new()
         .merge(catalog::routes::routes())
+        .merge(admin::routes::routes())
         .merge(products::routes::routes())
         .merge(promotions::routes::routes())
         .merge(orders::routes::routes())

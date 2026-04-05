@@ -9,6 +9,7 @@ mod m20260403000005_product_images;
 mod m20260403000006_promotions;
 mod m20260403000007_payment_methods;
 mod m20260403000008_order_payment_flows;
+mod m20260403000009_seller_affiliate_login_codes;
 
 use sea_orm_migration::prelude::*;
 
@@ -27,6 +28,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260403000006_promotions::Migration),
             Box::new(m20260403000007_payment_methods::Migration),
             Box::new(m20260403000008_order_payment_flows::Migration),
+            Box::new(m20260403000009_seller_affiliate_login_codes::Migration),
         ]
     }
 }

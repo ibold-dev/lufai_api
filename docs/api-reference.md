@@ -24,10 +24,30 @@ Unless noted, requests use **`Content-Type: application/json`** and responses re
 | `POST` | `/v1/customers/auth/register` | No |
 | `POST` | `/v1/customers/auth/login` | No |
 | `POST` | `/v1/customers/auth/google` | No |
-| `POST` | `/v1/sellers/auth/login` | No |
+| `POST` | `/v1/sellers/auth/login` | No — JSON `email` + `login_code` (admin-issued; Argon2-hashed server-side) |
+| `POST` | `/v1/affiliates/auth/login` | No — same shape as seller login |
 | `POST` | `/v1/admins/auth/login` | No |
 
 Auth routes use **stricter rate limiting** than the rest of the API (see `main.rs`).
+
+---
+
+## Admin: sellers & affiliates (provisioning)
+
+Admin JWT required. **Login codes** are returned **once** on create/rotate; the server never stores plaintext and cannot show them again.
+
+| Method | Path | Notes |
+|--------|------|--------|
+| `POST` | `/v1/admin/sellers` | Body `{ "email" }` — response includes `login_code` once |
+| `DELETE` | `/v1/admin/sellers/{seller_id}` | Fails with **409** if the seller still has products |
+| `POST` | `/v1/admin/sellers/{seller_id}/revoke-login` | Blocks sign-in until rotate |
+| `POST` | `/v1/admin/sellers/{seller_id}/rotate-login` | New `login_code` once |
+| `POST` | `/v1/admin/affiliates` | Body `{ "email", "referral_code" }` — unique referral code for customer signup; response includes `login_code` once |
+| `DELETE` | `/v1/admin/affiliates/{affiliate_id}` | |
+| `POST` | `/v1/admin/affiliates/{affiliate_id}/revoke-login` | |
+| `POST` | `/v1/admin/affiliates/{affiliate_id}/rotate-login` | New `login_code` once |
+
+Referral codes are stored **uppercase** (same rules as customer signup `affiliate_code`).
 
 ---
 

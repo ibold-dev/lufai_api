@@ -33,3 +33,13 @@ p, role:admin, /admin/promotions/*, read, any
 p, role:admin, /admin/promotions/*, update, any
 p, role:admin, /admin/promotions/*, delete, any
 
+p, role:admin, /admin/sellers/list, create, any
+p, role:admin, /admin/sellers/*, delete, any
+p, role:admin, /admin/sellers/*, revoke_login, any
+p, role:admin, /admin/sellers/*, rotate_login, any
+
+p, role:admin, /admin/affiliates/list, create, any
+p, role:admin, /admin/affiliates/*, delete, any
+p, role:admin, /admin/affiliates/*, revoke_login, any
+p, role:admin, /admin/affiliates/*, rotate_login, any
+

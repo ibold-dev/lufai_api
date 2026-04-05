@@ -644,7 +644,9 @@ mod tests {
             id: Set(seller_id),
             email: Set(format!("seller+{}@example.com", Uuid::new_v4())),
             full_name: Set("Test Seller".into()),
-            password_hash: Set("dummy_hash".into()),
+            password_hash: Set(None),
+            login_code_hash: Set(None),
+            login_revoked_at: Set(None),
             created_at: Set(now),
             updated_at: Set(now),
         })
@@ -769,7 +771,9 @@ mod tests {
             id: Set(seller_id),
             email: Set(format!("seller+{}@example.com", Uuid::new_v4())),
             full_name: Set("Test Seller".into()),
-            password_hash: Set("dummy_hash".into()),
+            password_hash: Set(None),
+            login_code_hash: Set(None),
+            login_revoked_at: Set(None),
             created_at: Set(now),
             updated_at: Set(now),
         })

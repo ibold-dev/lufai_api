@@ -1,19 +1,15 @@
-use axum::{
-    extract::Extension,
-    routing::post,
-    Json, Router,
-};
-use serde::{Deserialize, Serialize};
+use axum::{Json, Router, extract::Extension, routing::post};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use validator::Validate;
 
 use crate::{
     auth::{affiliate, google, jwt, password},
     db::db_err_is_unique_violation,
-    entity::{admin, customer, seller},
+    entity::{admin, affiliate as affiliate_entity, customer, seller},
     http::error::ApiError,
-    http::limits::MAX_AFFILIATE_CODE_LEN,
+    http::limits::{MAX_AFFILIATE_CODE_LEN, MAX_LOGIN_CODE_BYTES},
     state::AppState,
 };
 
@@ -23,6 +19,7 @@ pub fn routes() -> Router {
         .route("/customers/auth/login", post(customer_login))
         .route("/customers/auth/google", post(customer_google_sign_in))
         .route("/sellers/auth/login", post(seller_login))
+        .route("/affiliates/auth/login", post(affiliate_login))
         .route("/admins/auth/login", post(admin_login))
 }
 
@@ -32,6 +29,15 @@ pub struct EmailPasswordRequest {
     pub email: String,
     #[validate(length(min = 8, max = 256))]
     pub password: String,
+}
+
+/// Seller / affiliate login using admin-issued login code (not a password).
+#[derive(Debug, Deserialize, Validate, utoipa::ToSchema)]
+pub struct EmailLoginCodeRequest {
+    #[validate(email, length(max = 254))]
+    pub email: String,
+    #[validate(length(min = 8, max = 256))]
+    pub login_code: String,
 }
 
 #[derive(Debug, Deserialize, Validate, utoipa::ToSchema)]
@@ -66,7 +72,10 @@ pub struct GoogleSignInRequest {
     pub affiliate_code: Option<String>,
 }
 
-fn issue_customer_token(state: &AppState, customer_id: Uuid) -> Result<Json<AuthResponse>, ApiError> {
+fn issue_customer_token(
+    state: &AppState,
+    customer_id: Uuid,
+) -> Result<Json<AuthResponse>, ApiError> {
     let subject = format!("customer:{customer_id}");
     let access_token = jwt::create_access_token(
         &subject,
@@ -118,7 +127,8 @@ pub(crate) async fn customer_register(
     let email = req.email.trim().to_lowercase();
     let full_name = req.full_name.trim().to_string();
     let affiliate_id =
-        affiliate::resolve_affiliate_id_for_signup(&state.db, req.affiliate_code.as_deref()).await?;
+        affiliate::resolve_affiliate_id_for_signup(&state.db, req.affiliate_code.as_deref())
+            .await?;
 
     let customer_id = Uuid::new_v4();
     let now = chrono::Utc::now();
@@ -174,12 +184,8 @@ pub(crate) async fn customer_google_sign_in(
         ApiError::internal("Google sign-in is not configured (set GOOGLE_CLIENT_ID)".to_string())
     })?;
 
-    let claims = google::verify_google_id_token(
-        &state.http_client,
-        google_client_id,
-        &req.id_token,
-    )
-    .await?;
+    let claims =
+        google::verify_google_id_token(&state.http_client, google_client_id, &req.id_token).await?;
 
     let google_full_name = google::google_display_name(&claims);
     let email = claims.email.trim().to_lowercase();
@@ -218,11 +224,9 @@ pub(crate) async fn customer_google_sign_in(
         return issue_customer_token(&state, cid);
     }
 
-    let affiliate_id = affiliate::resolve_affiliate_id_for_signup(
-        &state.db,
-        req.affiliate_code.as_deref(),
-    )
-    .await?;
+    let affiliate_id =
+        affiliate::resolve_affiliate_id_for_signup(&state.db, req.affiliate_code.as_deref())
+            .await?;
 
     let customer_id = Uuid::new_v4();
     let now = chrono::Utc::now();
@@ -278,9 +282,7 @@ pub(crate) async fn customer_login(
     };
 
     let customer_id = row.id;
-    let password_hash = row
-        .password_hash
-        .ok_or_else(ApiError::unauthorized)?;
+    let password_hash = row.password_hash.ok_or_else(ApiError::unauthorized)?;
 
     let ok = password::verify_password(&password_hash, &req.password)?;
     if !ok {
@@ -290,10 +292,19 @@ pub(crate) async fn customer_login(
     issue_customer_token(&state, customer_id)
 }
 
+fn validate_email_login_code(req: &EmailLoginCodeRequest) -> Result<(), ApiError> {
+    req.validate()
+        .map_err(|_| ApiError::bad_request("invalid email or login code"))?;
+    if req.login_code.len() > MAX_LOGIN_CODE_BYTES {
+        return Err(ApiError::bad_request("login code is too long"));
+    }
+    Ok(())
+}
+
 #[utoipa::path(
     post,
     path = "/v1/sellers/auth/login",
-    request_body = EmailPasswordRequest,
+    request_body = EmailLoginCodeRequest,
     responses(
         (status = 200, body = AuthResponse),
         (status = 400, body = crate::http::error::ProblemDetails),
@@ -302,13 +313,13 @@ pub(crate) async fn customer_login(
 )]
 pub(crate) async fn seller_login(
     Extension(state): Extension<AppState>,
-    Json(req): Json<EmailPasswordRequest>,
+    Json(req): Json<EmailLoginCodeRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
-    validate_credentials(&req)?;
-    let email = req.email.trim();
+    validate_email_login_code(&req)?;
+    let email = req.email.trim().to_lowercase();
 
     let row = seller::Entity::find()
-        .filter(seller::Column::Email.eq(email))
+        .filter(seller::Column::Email.eq(&email))
         .one(&state.db)
         .await?;
 
@@ -316,15 +327,77 @@ pub(crate) async fn seller_login(
         return Err(ApiError::unauthorized());
     };
 
-    let seller_id = row.id;
-    let password_hash = row.password_hash;
+    if row.login_revoked_at.is_some() {
+        return Err(ApiError::unauthorized());
+    }
 
-    let ok = password::verify_password(&password_hash, &req.password)?;
+    let Some(ref hash) = row.login_code_hash else {
+        return Err(ApiError::unauthorized());
+    };
+
+    let ok = password::verify_password(hash, &req.login_code)?;
     if !ok {
         return Err(ApiError::unauthorized());
     }
 
+    let seller_id = row.id;
     let subject = format!("seller:{seller_id}");
+    let access_token = jwt::create_access_token(
+        &subject,
+        &state.jwt_secret,
+        &state.jwt_issuer,
+        state.access_token_ttl_secs,
+    )?;
+
+    Ok(Json(AuthResponse {
+        access_token,
+        token_type: "bearer",
+        expires_in: state.access_token_ttl_secs,
+        subject,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/affiliates/auth/login",
+    request_body = EmailLoginCodeRequest,
+    responses(
+        (status = 200, body = AuthResponse),
+        (status = 400, body = crate::http::error::ProblemDetails),
+        (status = 401, body = crate::http::error::ProblemDetails),
+    )
+)]
+pub(crate) async fn affiliate_login(
+    Extension(state): Extension<AppState>,
+    Json(req): Json<EmailLoginCodeRequest>,
+) -> Result<Json<AuthResponse>, ApiError> {
+    validate_email_login_code(&req)?;
+    let email = req.email.trim().to_lowercase();
+
+    let row = affiliate_entity::Entity::find()
+        .filter(affiliate_entity::Column::Email.eq(&email))
+        .one(&state.db)
+        .await?;
+
+    let Some(row) = row else {
+        return Err(ApiError::unauthorized());
+    };
+
+    if row.login_revoked_at.is_some() {
+        return Err(ApiError::unauthorized());
+    }
+
+    let Some(ref hash) = row.login_code_hash else {
+        return Err(ApiError::unauthorized());
+    };
+
+    let ok = password::verify_password(hash, &req.login_code)?;
+    if !ok {
+        return Err(ApiError::unauthorized());
+    }
+
+    let affiliate_id = row.id;
+    let subject = format!("affiliate:{affiliate_id}");
     let access_token = jwt::create_access_token(
         &subject,
         &state.jwt_secret,
