@@ -56,6 +56,40 @@ async fn main() -> Result<(), ApiError> {
         .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
         .init();
 
+    // Check for CLI script commands
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 4 && args[1] == "seed-admin" {
+        let email = &args[2];
+        let password = &args[3];
+        tracing::info!("Seeding admin account for {}...", email);
+
+        let db = db::try_create_db().await?.expect("DATABASE_URL is not set");
+        let password_hash = auth::password::hash_password(password)?;
+        let now = chrono::Utc::now();
+        let admin_id = uuid::Uuid::new_v4();
+
+        let active = entity::admin::ActiveModel {
+            id: sea_orm::Set(admin_id),
+            email: sea_orm::Set(email.clone()),
+            full_name: sea_orm::Set("Admin".to_string()),
+            password_hash: sea_orm::Set(password_hash),
+            created_at: sea_orm::Set(now),
+            updated_at: sea_orm::Set(now),
+        };
+
+        use sea_orm::EntityTrait;
+        match entity::admin::Entity::insert(active).exec(&db).await {
+            Ok(_) => {
+                tracing::info!("Successfully created admin with ID {}", admin_id);
+                std::process::exit(0);
+            }
+            Err(e) => {
+                tracing::error!("Failed to create admin (does it already exist?): {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
     let port: u16 = std::env::var("PORT")
         .ok()
         .and_then(|v| v.parse().ok())
