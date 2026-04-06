@@ -30,6 +30,7 @@ use tower_http::trace::TraceLayer;
 use tower_governor::governor::GovernorConfig;
 use tower_governor::key_extractor::PeerIpKeyExtractor;
 use tower_governor::GovernorLayer;
+use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::EnvFilter;
 use utoipa_swagger_ui::SwaggerUi;
 use utoipa::OpenApi;
@@ -120,6 +121,11 @@ async fn main() -> Result<(), ApiError> {
         .url("/v1/openapi.json", openapi::ApiDoc::openapi());
     let swagger_router: axum::Router<()> = axum::Router::from(swagger_ui);
 
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     let app = axum::Router::new()
         .route("/healthz", axum::routing::get(healthz))
         .route("/v1", axum::routing::get(v1_root))
@@ -147,7 +153,8 @@ async fn main() -> Result<(), ApiError> {
         )
         .layer(DefaultBodyLimit::max(DEFAULT_REQUEST_BODY_MAX))
         .layer(Extension(state))
-        .layer(TraceLayer::new_for_http());
+        .layer(TraceLayer::new_for_http())
+        .layer(cors);
 
     tracing::info!("listening on http://{addr}");
 

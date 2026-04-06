@@ -139,6 +139,19 @@ sudo docker compose -f docker-compose.prod.yml up -d --build
 
 ---
 
+## Phase 6: Seed Initial Admin Account
+
+To access the admin dashboard, you must create an initial admin account within the running Docker container. The application includes a built-in CLI command to handle this securely.
+
+```bash
+# Run this command on the server while the docker containers are actively running.
+# Replace with your desired admin email and a strong password.
+sudo docker compose -f docker-compose.prod.yml exec api ./lufai_api seed-admin "admin@example.com" "SecurePassword123!"
+```
+If successful, you will see `Successfully created admin with ID ...`.
+
+---
+
 ## 100% Correctness Checklist (Operational Check)
 
 1.  **Health Check**: `curl -I https://api.yourdomain.com/healthz` (Should return 200 OK).
