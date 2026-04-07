@@ -88,7 +88,8 @@ Use the appropriate **login or register** route for the actor type:
 |-------|----------|-------|
 | Customer | `POST /v1/customers/auth/register` | `POST /v1/customers/auth/login` |
 | Customer (Google) | — | `POST /v1/customers/auth/google` |
-| Seller | — | `POST /v1/sellers/auth/login` |
+| Seller | — | `POST /v1/sellers/auth/login` (`email` + `login_code`) |
+| Affiliate | — | `POST /v1/affiliates/auth/login` (`email` + `login_code`) |
 | Admin | — | `POST /v1/admins/auth/login` |
 
 Successful responses include an **`AuthResponse`** with:
@@ -176,7 +177,7 @@ If you send the **same** key again for the **same** idempotent operation, the AP
 
 The server uses **tower-governor** (IP-based):
 
-- **Auth routes** (`/v1/customers/auth/*`, `/v1/sellers/auth/*`, `/v1/admins/auth/*`) use a **stricter** limit (`GovernorConfig::secure()`).
+- **Auth routes** (`/v1/customers/auth/*`, `/v1/sellers/auth/*`, `/v1/affiliates/auth/*`, `/v1/admins/auth/*`) use a **stricter** limit (`GovernorConfig::secure()`).
 - **Other `/v1` business routes** use the default profile.
 
 **UI behavior:** On **429** (if exposed by your deployment) or repeated failures, **back off** and avoid tight retry loops.
@@ -205,6 +206,20 @@ This API does **not** configure CORS in the snippets shown in `main.rs`. If a **
 | Order detail (lines, totals) | `GET /v1/orders/{order_id}` | Customer JWT |
 
 Use the **list** endpoints for grids and history; use **`GET /v1/orders/{order_id}`** when you need full line items and payment snapshot fields.
+
+---
+
+## Admin listing endpoints
+
+Admin JWT can fetch paginated identity lists:
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /v1/admin/users?limit=&offset=` | Combined user identities across `customer`, `seller`, `affiliate` |
+| `GET /v1/admin/sellers?limit=&offset=` | Sellers list |
+| `GET /v1/admin/affiliates?limit=&offset=` | Affiliates list |
+
+These endpoints return only operational profile fields (ids/emails/timestamps and role/revocation flags), never login hashes or raw login codes.
 
 ---
 

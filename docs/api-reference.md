@@ -38,10 +38,13 @@ Admin JWT required. **Login codes** are returned **once** on create/rotate; the 
 
 | Method | Path | Notes |
 |--------|------|--------|
+| `GET` | `/v1/admin/users` | Combined users list (`customer`, `seller`, `affiliate`), paginated (`limit`, `offset`) |
+| `GET` | `/v1/admin/sellers` | Paginated sellers list (`limit`, `offset`) |
 | `POST` | `/v1/admin/sellers` | Body `{ "email" }` — response includes `login_code` once |
 | `DELETE` | `/v1/admin/sellers/{seller_id}` | Fails with **409** if the seller still has products |
 | `POST` | `/v1/admin/sellers/{seller_id}/revoke-login` | Blocks sign-in until rotate |
 | `POST` | `/v1/admin/sellers/{seller_id}/rotate-login` | New `login_code` once |
+| `GET` | `/v1/admin/affiliates` | Paginated affiliates list (`limit`, `offset`) |
 | `POST` | `/v1/admin/affiliates` | Body `{ "email", "referral_code" }` — unique referral code for customer signup; response includes `login_code` once |
 | `DELETE` | `/v1/admin/affiliates/{affiliate_id}` | |
 | `POST` | `/v1/admin/affiliates/{affiliate_id}/revoke-login` | |
