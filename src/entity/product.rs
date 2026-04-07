@@ -1,6 +1,7 @@
 //! SeaORM entity: `products`
 
 use sea_orm::entity::prelude::*;
+use serde_json::Value as JsonValue;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "products")]
@@ -15,8 +16,9 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub dimensions: Option<Json>,
     /// When `None`, all methods (`electronic`, `cash_on_delivery`, `installment`) apply.
-    #[sea_orm(column_type = "Json", nullable)]
-    pub allowed_payment_methods: Option<Vec<String>>,
+    /// Stored as JSON array in `jsonb` (not `text[]`).
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub allowed_payment_methods: Option<JsonValue>,
     pub status: String,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,

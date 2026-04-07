@@ -81,8 +81,8 @@ pub(crate) async fn confirm_cash_on_delivery(
         .await?
         .ok_or_else(|| ApiError::not_found("order not found"))?;
 
-    if !order_row
-        .allowed_payment_methods
+    let methods_vec = payment_methods::json_to_methods_vec(&order_row.allowed_payment_methods)?;
+    if !methods_vec
         .iter()
         .any(|m| m == payment_methods::CASH_ON_DELIVERY)
     {
@@ -201,8 +201,8 @@ pub(crate) async fn start_installment(
         .await?
         .ok_or_else(|| ApiError::not_found("order not found"))?;
 
-    if !order_row
-        .allowed_payment_methods
+    let methods_vec = payment_methods::json_to_methods_vec(&order_row.allowed_payment_methods)?;
+    if !methods_vec
         .iter()
         .any(|m| m == payment_methods::INSTALLMENT)
     {

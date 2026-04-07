@@ -359,7 +359,12 @@ mod tests {
             shipping_cents: Set(0),
             tax_cents: Set(0),
             total_cents: Set(amount_cents),
-            allowed_payment_methods: Set(crate::payments::methods::all_payment_methods()),
+            allowed_payment_methods: Set(
+                crate::payments::methods::vec_to_json_methods(
+                    crate::payments::methods::all_payment_methods(),
+                )
+                .expect("methods json"),
+            ),
             payment_channel: Set(None),
             installment_plan: Set(None),
             delivery_address: Set(serde_json::json!({})),

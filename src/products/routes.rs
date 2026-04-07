@@ -346,7 +346,9 @@ pub(crate) fn model_to_response(m: product::Model, images: Vec<ProductImageRespo
         currency: m.currency,
         dimensions: m.dimensions,
         status: m.status,
-        allowed_payment_methods: m.allowed_payment_methods,
+        allowed_payment_methods: payment_methods::json_opt_to_methods_vec(
+            &m.allowed_payment_methods,
+        ),
         images,
     }
 }
@@ -445,7 +447,9 @@ pub(crate) async fn create_product(
         price_cents: Set(req.price_cents),
         currency: Set("NGN".to_string()),
         dimensions: Set(req.dimensions),
-        allowed_payment_methods: Set(req.allowed_payment_methods.clone()),
+        allowed_payment_methods: Set(payment_methods::opt_vec_to_json_methods(
+            req.allowed_payment_methods.clone(),
+        )?),
         status: Set("pending".to_string()),
         created_at: Set(now),
         updated_at: Set(now),
@@ -571,7 +575,7 @@ pub(crate) async fn update_product(
             active.allowed_payment_methods = Set(None);
         } else {
             payment_methods::validate_payment_methods_list(&v)?;
-            active.allowed_payment_methods = Set(Some(v));
+            active.allowed_payment_methods = Set(Some(payment_methods::vec_to_json_methods(v)?));
         }
     }
     active.updated_at = Set(now);

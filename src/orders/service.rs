@@ -85,6 +85,8 @@ pub async fn fetch_order_with_items(
         })
         .collect();
 
+    let methods_vec = methods::json_to_methods_vec(&order_row.allowed_payment_methods)?;
+
     Ok(OrderResponse {
         id: order_row.id,
         customer_id: order_row.customer_id,
@@ -94,7 +96,7 @@ pub async fn fetch_order_with_items(
         shipping_cents: order_row.shipping_cents,
         tax_cents: order_row.tax_cents,
         total_cents: order_row.total_cents,
-        allowed_payment_methods: order_row.allowed_payment_methods.clone(),
+        allowed_payment_methods: methods_vec,
         payment_channel: order_row.payment_channel.clone(),
         installment_plan: order_row.installment_plan.clone().map(Into::into),
         delivery_address: order_row.delivery_address,
@@ -187,7 +189,7 @@ pub async fn create_order_from_request(
         shipping_cents: Set(shipping_cents),
         tax_cents: Set(tax_cents),
         total_cents: Set(total_cents),
-        allowed_payment_methods: Set(allowed_payment_methods),
+        allowed_payment_methods: Set(methods::vec_to_json_methods(allowed_payment_methods)?),
         payment_channel: Set(None),
         installment_plan: Set(None),
         delivery_address: Set(req.delivery_address.clone()),

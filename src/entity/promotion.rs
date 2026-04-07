@@ -1,6 +1,7 @@
 //! SeaORM entity: `promotions`
 
 use sea_orm::entity::prelude::*;
+use serde_json::Value as JsonValue;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "promotions")]
@@ -18,8 +19,8 @@ pub struct Model {
     pub discount_fixed_cents: Option<i64>,
     pub priority: i32,
     /// When `None`, line inherits product rules. When set, overrides for discounted lines.
-    #[sea_orm(column_type = "Json", nullable)]
-    pub allowed_payment_methods: Option<Vec<String>>,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub allowed_payment_methods: Option<JsonValue>,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }

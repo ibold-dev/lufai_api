@@ -48,11 +48,37 @@ pub fn validate_payment_methods_list(methods: &[String]) -> Result<(), ApiError>
     Ok(())
 }
 
+/// Serialize method ids for `jsonb` columns (avoids Postgres `text[]` vs `jsonb` mismatch).
+pub fn vec_to_json_methods(v: Vec<String>) -> Result<serde_json::Value, ApiError> {
+    serde_json::to_value(&v).map_err(|e| {
+        ApiError::internal(format!("serialize allowed_payment_methods: {e}"))
+    })
+}
+
+pub fn opt_vec_to_json_methods(
+    v: Option<Vec<String>>,
+) -> Result<Option<serde_json::Value>, ApiError> {
+    match v {
+        None => Ok(None),
+        Some(vec) => Ok(Some(vec_to_json_methods(vec)?)),
+    }
+}
+
+pub fn json_to_methods_vec(j: &serde_json::Value) -> Result<Vec<String>, ApiError> {
+    serde_json::from_value(j.clone()).map_err(|e| {
+        ApiError::internal(format!("allowed_payment_methods in database: {e}"))
+    })
+}
+
+pub fn json_opt_to_methods_vec(j: &Option<serde_json::Value>) -> Option<Vec<String>> {
+    j.as_ref().and_then(|j| json_to_methods_vec(j).ok())
+}
+
 pub fn product_effective_methods(p: &product::Model) -> Vec<String> {
-    match &p.allowed_payment_methods {
+    match json_opt_to_methods_vec(&p.allowed_payment_methods) {
         None => all_payment_methods(),
         Some(v) if v.is_empty() => all_payment_methods(),
-        Some(v) => v.clone(),
+        Some(v) => v,
     }
 }
 
@@ -62,10 +88,10 @@ pub fn line_effective_methods(p: &product::Model, promo: Option<&promotion::Mode
     let Some(pr) = promo else {
         return base;
     };
-    match &pr.allowed_payment_methods {
+    match json_opt_to_methods_vec(&pr.allowed_payment_methods) {
         None => base,
         Some(v) if v.is_empty() => base,
-        Some(v) => v.clone(),
+        Some(v) => v,
     }
 }
 

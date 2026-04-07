@@ -441,7 +441,9 @@ async fn model_to_response(
         discount_percent: m.discount_percent,
         discount_fixed_cents: m.discount_fixed_cents,
         priority: m.priority,
-        allowed_payment_methods: m.allowed_payment_methods,
+        allowed_payment_methods: payment_methods::json_opt_to_methods_vec(
+            &m.allowed_payment_methods,
+        ),
         product_ids,
         created_at: m.created_at,
         updated_at: m.updated_at,
@@ -493,7 +495,9 @@ pub(crate) async fn create_seller_promotion(
         discount_percent: Set(req.discount_percent),
         discount_fixed_cents: Set(req.discount_fixed_cents),
         priority: Set(req.priority),
-        allowed_payment_methods: Set(req.allowed_payment_methods.clone()),
+        allowed_payment_methods: Set(payment_methods::opt_vec_to_json_methods(
+            req.allowed_payment_methods.clone(),
+        )?),
         created_at: Set(now),
         updated_at: Set(now),
     };
@@ -653,7 +657,7 @@ pub(crate) async fn update_seller_promotion(
             active.allowed_payment_methods = Set(None);
         } else {
             payment_methods::validate_payment_methods_list(&v)?;
-            active.allowed_payment_methods = Set(Some(v));
+            active.allowed_payment_methods = Set(Some(payment_methods::vec_to_json_methods(v)?));
         }
     }
     active.updated_at = Set(now);
@@ -754,7 +758,9 @@ pub(crate) async fn create_admin_promotion(
         discount_percent: Set(req.discount_percent),
         discount_fixed_cents: Set(req.discount_fixed_cents),
         priority: Set(req.priority),
-        allowed_payment_methods: Set(req.allowed_payment_methods.clone()),
+        allowed_payment_methods: Set(payment_methods::opt_vec_to_json_methods(
+            req.allowed_payment_methods.clone(),
+        )?),
         created_at: Set(now),
         updated_at: Set(now),
     };
@@ -914,7 +920,7 @@ pub(crate) async fn update_admin_promotion(
             active.allowed_payment_methods = Set(None);
         } else {
             payment_methods::validate_payment_methods_list(&v)?;
-            active.allowed_payment_methods = Set(Some(v));
+            active.allowed_payment_methods = Set(Some(payment_methods::vec_to_json_methods(v)?));
         }
     }
     active.updated_at = Set(now);

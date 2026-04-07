@@ -1,6 +1,7 @@
 //! SeaORM entity: `orders`
 
 use sea_orm::entity::prelude::*;
+use serde_json::Value as JsonValue;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "orders")]
@@ -15,8 +16,8 @@ pub struct Model {
     pub tax_cents: i64,
     pub total_cents: i64,
     /// Intersection of allowed methods for all lines at checkout (snapshot).
-    #[sea_orm(column_type = "Json")]
-    pub allowed_payment_methods: Vec<String>,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub allowed_payment_methods: JsonValue,
     /// Set when customer chooses COD, installment, or Paystack (electronic).
     pub payment_channel: Option<String>,
     #[sea_orm(column_type = "JsonBinary", nullable)]
