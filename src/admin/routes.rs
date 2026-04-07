@@ -1,14 +1,14 @@
 //! Create sellers/affiliates with email; auto-generated login codes (shown once). Revoke/rotate/delete.
 
 use axum::{
-    extract::{Extension, Path},
+    extract::{Extension, Path, Query},
     http::HeaderMap,
-    routing::{delete, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter,
-    Set,
+    QueryOrder, QuerySelect, Set,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -23,14 +23,18 @@ use crate::{
     },
     authz::casbin as casbin_authz,
     db::db_err_is_unique_violation,
-    entity::{affiliate, product, seller},
+    entity::{affiliate, customer, product, seller},
     http::error::ApiError,
-    http::limits::{MAX_AFFILIATE_CODE_LEN, MAX_LOGIN_CODE_BYTES},
+    http::limits::{
+        DEFAULT_PAGE_SIZE, MAX_AFFILIATE_CODE_LEN, MAX_LOGIN_CODE_BYTES, MAX_PAGE_SIZE,
+    },
     state::AppState,
 };
 
 pub fn routes() -> Router {
     Router::new()
+        .route("/admin/users", get(list_users))
+        .route("/admin/sellers", get(list_sellers))
         .route("/admin/sellers", post(create_seller))
         .route("/admin/sellers/{seller_id}", delete(delete_seller))
         .route(
@@ -41,6 +45,7 @@ pub fn routes() -> Router {
             "/admin/sellers/{seller_id}/rotate-login",
             post(rotate_seller_login),
         )
+        .route("/admin/affiliates", get(list_affiliates))
         .route("/admin/affiliates", post(create_affiliate))
         .route("/admin/affiliates/{affiliate_id}", delete(delete_affiliate))
         .route(
@@ -111,6 +116,10 @@ fn admin_affiliate_obj(id: Uuid) -> String {
     format!("/admin/affiliates/{id}")
 }
 
+fn admin_users_list_obj() -> &'static str {
+    "/admin/users/list"
+}
+
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DeletedFlagResponse {
     pub deleted: bool,
@@ -119,6 +128,68 @@ pub struct DeletedFlagResponse {
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RevokedFlagResponse {
     pub revoked: bool,
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct AdminListQuery {
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub offset: u32,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AdminSellerSummary {
+    pub id: Uuid,
+    pub email: String,
+    pub full_name: String,
+    pub login_revoked: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AdminAffiliateSummary {
+    pub id: Uuid,
+    pub email: Option<String>,
+    pub referral_code: String,
+    pub login_revoked: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AdminUserSummary {
+    pub id: Uuid,
+    pub role: String,
+    pub email: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct PaginatedAdminSellersResponse {
+    pub items: Vec<AdminSellerSummary>,
+    pub total: u64,
+    pub limit: u32,
+    pub offset: u32,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct PaginatedAdminAffiliatesResponse {
+    pub items: Vec<AdminAffiliateSummary>,
+    pub total: u64,
+    pub limit: u32,
+    pub offset: u32,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct PaginatedAdminUsersResponse {
+    pub items: Vec<AdminUserSummary>,
+    pub total: u64,
+    pub limit: u32,
+    pub offset: u32,
+}
+
+fn normalize_list_limit(limit: Option<u32>) -> u32 {
+    limit.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, MAX_PAGE_SIZE)
 }
 
 #[derive(Debug, Deserialize, Validate, utoipa::ToSchema)]
@@ -155,6 +226,175 @@ pub struct AdminAffiliateProvisionResponse {
 
 fn normalize_email(s: &str) -> String {
     s.trim().to_lowercase()
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/admin/sellers",
+    params(AdminListQuery),
+    responses(
+        (status = 200, body = PaginatedAdminSellersResponse),
+        (status = 401, body = crate::http::error::ProblemDetails),
+        (status = 403, body = crate::http::error::ProblemDetails),
+        (status = 500, body = crate::http::error::ProblemDetails)
+    ),
+    security(("bearerAuth" = []))
+)]
+pub(crate) async fn list_sellers(
+    headers: HeaderMap,
+    Extension(state): Extension<AppState>,
+    Query(q): Query<AdminListQuery>,
+) -> Result<Json<PaginatedAdminSellersResponse>, ApiError> {
+    let (actor_sub, _admin_id) = require_admin(&headers, &state).await?;
+    ensure_admin(&actor_sub, admin_sellers_list_obj(), "read").await?;
+    let limit = normalize_list_limit(q.limit);
+    let offset = q.offset;
+
+    let total = seller::Entity::find().count(&state.db).await?;
+    let rows = seller::Entity::find()
+        .order_by_desc(seller::Column::CreatedAt)
+        .limit(u64::from(limit))
+        .offset(u64::from(offset))
+        .all(&state.db)
+        .await?;
+
+    let items = rows
+        .into_iter()
+        .map(|m| AdminSellerSummary {
+            id: m.id,
+            email: m.email,
+            full_name: m.full_name,
+            login_revoked: m.login_revoked_at.is_some(),
+            created_at: m.created_at.into(),
+        })
+        .collect();
+    Ok(Json(PaginatedAdminSellersResponse {
+        items,
+        total,
+        limit,
+        offset,
+    }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/admin/affiliates",
+    params(AdminListQuery),
+    responses(
+        (status = 200, body = PaginatedAdminAffiliatesResponse),
+        (status = 401, body = crate::http::error::ProblemDetails),
+        (status = 403, body = crate::http::error::ProblemDetails),
+        (status = 500, body = crate::http::error::ProblemDetails)
+    ),
+    security(("bearerAuth" = []))
+)]
+pub(crate) async fn list_affiliates(
+    headers: HeaderMap,
+    Extension(state): Extension<AppState>,
+    Query(q): Query<AdminListQuery>,
+) -> Result<Json<PaginatedAdminAffiliatesResponse>, ApiError> {
+    let (actor_sub, _admin_id) = require_admin(&headers, &state).await?;
+    ensure_admin(&actor_sub, admin_affiliates_list_obj(), "read").await?;
+    let limit = normalize_list_limit(q.limit);
+    let offset = q.offset;
+
+    let total = affiliate::Entity::find().count(&state.db).await?;
+    let rows = affiliate::Entity::find()
+        .order_by_desc(affiliate::Column::CreatedAt)
+        .limit(u64::from(limit))
+        .offset(u64::from(offset))
+        .all(&state.db)
+        .await?;
+
+    let items = rows
+        .into_iter()
+        .map(|m| AdminAffiliateSummary {
+            id: m.id,
+            email: m.email,
+            referral_code: m.code,
+            login_revoked: m.login_revoked_at.is_some(),
+            created_at: m.created_at.into(),
+        })
+        .collect();
+
+    Ok(Json(PaginatedAdminAffiliatesResponse {
+        items,
+        total,
+        limit,
+        offset,
+    }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/admin/users",
+    params(AdminListQuery),
+    responses(
+        (status = 200, body = PaginatedAdminUsersResponse),
+        (status = 401, body = crate::http::error::ProblemDetails),
+        (status = 403, body = crate::http::error::ProblemDetails),
+        (status = 500, body = crate::http::error::ProblemDetails)
+    ),
+    security(("bearerAuth" = []))
+)]
+pub(crate) async fn list_users(
+    headers: HeaderMap,
+    Extension(state): Extension<AppState>,
+    Query(q): Query<AdminListQuery>,
+) -> Result<Json<PaginatedAdminUsersResponse>, ApiError> {
+    let (actor_sub, _admin_id) = require_admin(&headers, &state).await?;
+    ensure_admin(&actor_sub, admin_users_list_obj(), "read").await?;
+    let limit = usize::try_from(normalize_list_limit(q.limit)).unwrap_or(20);
+    let offset = usize::try_from(q.offset).unwrap_or(0);
+
+    let customers = customer::Entity::find().all(&state.db).await?;
+    let sellers = seller::Entity::find().all(&state.db).await?;
+    let affiliates = affiliate::Entity::find()
+        .filter(affiliate::Column::Email.is_not_null())
+        .all(&state.db)
+        .await?;
+
+    let mut items: Vec<AdminUserSummary> = Vec::with_capacity(
+        customers.len() + sellers.len() + affiliates.len(),
+    );
+
+    for c in customers {
+        items.push(AdminUserSummary {
+            id: c.id,
+            role: "customer".to_string(),
+            email: c.email,
+            created_at: c.created_at.into(),
+        });
+    }
+    for s in sellers {
+        items.push(AdminUserSummary {
+            id: s.id,
+            role: "seller".to_string(),
+            email: s.email,
+            created_at: s.created_at.into(),
+        });
+    }
+    for a in affiliates {
+        if let Some(email) = a.email {
+            items.push(AdminUserSummary {
+                id: a.id,
+                role: "affiliate".to_string(),
+                email,
+                created_at: a.created_at.into(),
+            });
+        }
+    }
+
+    items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    let total = items.len() as u64;
+    let paged = items.into_iter().skip(offset).take(limit).collect();
+
+    Ok(Json(PaginatedAdminUsersResponse {
+        items: paged,
+        total,
+        limit: limit as u32,
+        offset: offset as u32,
+    }))
 }
 
 #[utoipa::path(
